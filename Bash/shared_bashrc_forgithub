@@ -1,0 +1,551 @@
+
+## shared aliases for WRJ crew
+
+alias sb='source ~/.bashrc'
+
+alias pdrive='echo; echo " [PUSH] -- PDRIVE -- (popd to return to $PWD) "; echo; pushd /cifs3/vhacdwfpcfs02/$USER/Projects/ > /dev/null; ls -alrtd */';
+
+alias bu='python /data/prod/common/WRJ_macros/backups/utils/backup.py'
+
+alias popd='popd > /dev/null'
+alias pushd='pushd > /dev/null'
+
+alias updates='touch ~/.bash_update_notifications; diff ~/.bash_update_notifications /data/prod/common/WRJ_macros/.bash_updates | grep \>; rm -f ~/.bash_update_notifications; cp /data/prod/common/WRJ_macros/.bash_updates ~/.bash_update_notifications;'
+
+alias UPDATES='less /data/prod/common/WRJ_macros/.bash_updates'
+
+
+# flow: parameterize and launch the cohort flow SAS macro from the bash command line
+# also write out (to CWD) an R script for producing a 'consort diagram'
+function flow {
+	if [ "$1" == "" ]; then
+		echo; echo 'usage: flow <dataset name> <flag list>';
+		echo 'NOTES: ';
+		echo ' - use of trailing colon in specifying flag list is OK, e.g., "attr:"';
+		echo ' - if flag list is omitted, "flag:" will be assumed';
+		echo ' - if flag list is "s", you will be prompted to specify a list';
+		echo ' - if specifying a list, you will be asked for a prefix and a list of numbers, e.g., 2-7 9'; echo;
+		return
+	fi
+	sasds='here.'
+	dsstrip=$(echo "$1" | cut -d'.' -f 1)
+	sasds+="$dsstrip"
+	fullds=$(echo "$1" | cut -d'.' -f 1)'.sas7bdat'
+	if [ ! -f "$fullds" ]; then
+		echo; echo 'The file' "$fullds" 'does not exist!'; echo;
+		return
+	fi
+	shift
+	flags="$@"
+	if [ "$flags" == "" ]; then
+		flags='flag:'
+	elif [ "$flags" == "s" ] || [ "$flags" == "S" ]; then
+		read -p "Enter the prefix for flag variables (or [Enter] to cancel): " prfx
+		if [ "$prfx" == "" ]; then
+			return
+		fi
+		zp=1
+		if [ "${prfx:${#prfx}-1:1}" == "!" ]; then
+			zp=0
+			prfx=${prfx:0:${#prfx}-1}
+		fi
+		prfx=$(echo "$prfx" | cut -d':' -f 1)
+		read -p "Enter a numeric list (or [Enter] for all): " numlist
+		if [ "$numlist" != "" ]; then
+			flags=""
+			IFS=' ' read -ra segs <<< $numlist
+			for s in "${segs[@]}"; do
+				sn=$(echo "$s" | cut -d'-' -f 1)
+				en=$(echo "$s" | cut -d'-' -f 2)
+				for (( c=$sn; c<=$en; c++ )); do
+					f=$prfx
+					if [ "$zp" == "1" ] && [ "${#c}" == "1" ]; then 
+						f+='0'
+					fi
+					f+=$c
+					f+=':'
+					flags+=$f
+					flags+=' '
+				done
+			done
+		else
+			flags=$prfx
+			flags+=':'
+		fi
+	fi
+	rs='attrition_rscript_for_'
+	rs+="$dsstrip"
+	rs+='.r'
+	echo; echo '...running cohort flow for' "$sasds" 'using flag list: ' "$flags"; echo '...This script has to wait for the Grid...'; echo;
+	echo '...R script for attrition diagram will be written to:'; echo "$rs"; echo;	
+	echo "ods noptitle;" > comline_$USER.sas;
+	echo "options nodate nonumber mprint;" >> comline_$USER.sas;
+	echo "libname here '$PWD';" >> comline_$USER.sas;
+	echo '%include "/data/prod/common/WRJ_macros/mk.globals.sas";' >> comline_$USER.sas
+	echo '%include "/data/prod/common/WRJ_macros/cohort_flow.sas";' >> comline_$USER.sas
+	echo '%flow(srcdat='"$sasds"', flaglist='"$flags"', out_rscript='"$rs"');' >> comline_$USER.sas
+	rm -f comline_$USER.lst;
+	rm -f comline_$USER.log;
+	sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM comline_$USER.sas;
+	cat comline_$USER.lst;
+	echo " ";
+}
+
+# mems: identify members of the current project space 
+function mems () {
+	foundit=0
+	IFS='/' read -a ordpath <<< "$PWD"
+	for i in "${ordpath[@]}"; do
+		if [[ $(cut -b 1-4 <<< "$i") == "ord_" ]]; then
+			foundit=1
+			smems=$(cut -d':' -f 4 <<< $(getent group | grep "$i")) 
+			IFS=',' read -a mems <<< $smems
+			anyWRJ=0
+			echo; echo "WRJ members for project $i:"; echo;
+			for m in "${mems[@]}"; do
+				if [[ $(cut -b 1-6 <<< "$m") == "vhawrj" ]]; then
+					echo "$m"
+					anyWRJ=1
+				fi
+			done
+			if [ "$anyWRJ" == 0 ]; then
+				echo "...none found!";
+			fi
+			echo;
+			break
+		fi
+	done
+	if [ "$foundit" == 0 ]; then
+		echo; echo "...you are not in an ORD_ project!"; echo;
+	fi
+}
+
+# unq: count number of unique values of a stated variable or set of variables in the specified SAS dataset
+unq () {
+	if [ "$1" == "" ]; then
+		echo; echo 'USAGE: unq <dataset> <varname> (if varname is not specified, patientICN is assumed)'; echo;
+		return
+	fi
+
+	EXP="1=1" #default where calasue
+	WHERE="None"
+
+	if [ -f "$PWD/$1" ] || [ -f "$PWD/$1.sas7bdat" ] || [ -f "$PWD/$1.sas7bvew" ]; then
+
+		read -p "Do you want to use WHERE clause? [y/n]:" ans
+		if  [ "$ans" == "Y" ]||[ "$ans" == "y" ]; then
+			read -p "Enter the WHERE clause expression here <use single quotes for string comparision> :" EXP
+			if [ "$EXP" == "" ] ; then 
+				EXP="1=1"
+			else 
+				WHERE="$EXP"
+			fi 
+		fi
+		ds=$(echo "$1" |sed -r -e 's/\.sas7bdat$|\.sas7bvew$//I')	
+		vars=$(echo "$@"|cut --complement -d ' '  -f 1 --output-delimiter=',' )
+		if [ "$2" == "" ]; then
+			vars='PatientICN'
+		fi
+		echo "options nodate nonumber nocenter formdlim=' ' pagesize=max;" > comline_$USER.sas;
+		echo "libname here '$PWD';" >> comline_$USER.sas;
+		echo '%include "/data/prod/common/WRJ_macros/mk.globals.sas";' >> comline_$USER.sas
+		echo "title # of unique values of $uvar in dataset $ds;" >> comline_$USER.sas
+		echo "proc sql; select count(*) as unique_vals, '$vars' as uniq_keys, \"$WHERE\" as WhereClause ">> comline_$USER.sas 
+		echo "from (select count(*) as nrecs from  here.$ds WHERE $EXP group by $vars) A ; quit;" >> comline_$USER.sas
+		rm -f comline_$USER.lst;
+		rm -f comline_$USER.log;
+		sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM comline_$USER.sas ;
+		#>/dev/null ; 
+		echo -e "\n";
+		cat comline_$USER.lst;
+		echo -e "\n"	
+	else
+		echo; echo '...you must supply a valid SAS dataset or view name for argument 1!'; echo;
+	fi
+	unset ds vars 
+}
+
+# freq: parameterize and launch a PROC FREQ in SAS from the bash command line
+function freq () {
+	if [ -f "$PWD/$1" ] || [ -f "$PWD/$1.sas7bdat" ] || [ -f "$PWD/$1.sas7bvew" ]; then
+		ds="here.";
+		ds+=$(echo "$1" | cut -d'.' -f 1);
+		opts="missing"
+		useT1='n'
+		if echo "$2" | grep '*' > /dev/null; then 
+			opts+=" norow nocol nopercent nocum";
+			v1=$(echo "$2" | cut -d'*' -f 1)
+			v2=$(echo "$2" | cut -d'*' -f 2)
+			read -p "...use table1 macro? [y/n]: " useT1
+			if [ "$useT1" != "" ]; then
+				useT1=$(echo "$useT1" | tr '[:upper:]' '[:lower:]')
+			else
+				useT1='n'
+			fi
+		fi
+		wstate=""
+		fstate=""
+		if [ "$3" == "w" ] || [ "$3" == "W" ] || [ "$4" == "w" ] || [ "$4" == "W" ]; then
+			read -p "WHERE (<Enter> for none): " wstate
+		fi
+		if [ "$3" == "f" ] || [ "$3" == "F" ] || [ "$4" == "f" ] || [ "$4" == "F" ]; then
+			read -p "FORMAT (<Enter> for none): " fstate
+			if [ "$fstate" != "" ]; then
+				lc=$(echo "$fstate" | rev | cut -b 1)
+				if [ "$lc" != "." ]; then
+					fstate+="."
+				fi
+				fstate="format $fstate"
+			fi
+		fi
+		echo "ods noptitle;" > comline_$USER.sas;
+		echo "options nodate nonumber;" >> comline_$USER.sas;
+		echo "libname here '$PWD';" >> comline_$USER.sas;
+		if [ "$useT1" == "y" ]; then
+			echo "%include '/data/prod/common/WRJ_macros/table1.sas';" >> comline_$USER.sas;
+			echo "data forT1; set $ds; where $wstate; run;" >> comline_$USER.sas;
+			echo "%table1(personfile=forT1, stratvars=$v2, rowvars=$v1);" >> comline_$USER.sas;
+			echo "proc export data=table1 dbms=csv replace outfile='$PWD/comline_$USER.csv'; run;" >> comline_$USER.sas;
+			echo; echo "...your output table will be written to the file comline_$USER.csv"; echo;
+		else
+			echo "title '-- $ds -- $wstate'; proc freq data=$ds; where $wstate; $fstate; table $2/$opts; run;" >> comline_$USER.sas;
+		fi
+		rm -f comline_$USER.lst;
+		rm -f comline_$USER.log;
+		sasgsub -GRIDWAITRESULTS -GRIDSUBMITPGM comline_$USER.sas;
+		echo " ";
+		if [ "$useT1" == "y" ]; then
+			csv comline_$USER.csv;
+		else
+			cat comline_$USER.lst;
+		fi
+		echo " ";
+	else
+		echo " ";
+		echo "USAGE (1d table): freq <SAS dataset name> <variable name>";
+		echo "USAGE (2d table): freq <SAS dataset name> <variable name 1>*<variable name 2> (no spaces)";
+		echo "EXAMPLE 1:  freq ptlev_covvax.sas7bdat vaxsrc";
+		echo "EXAMPLE 2:  freq ptlev_covvax.sas7bdat vaxyr*vaxsrc";
+		echo "NOTES: add 'w' and/or 'f' flags as 3rd or 4th arguments to be prompted for a WHERE and/or FORMAT statement";
+		echo " ";
+	fi
+}
+
+# com: allow user to write and execute SAS code directly from the bash command line
+# usage: type 'com', hit Enter, write a SAS program (multi line).  Program will be 
+# launched automatically after two blank lines are entered.  Output, if any, will 
+# be displayed on screen after completion 
+function com () {
+	echo "options nodate nonumber nocenter formdlim=' ' pagesize=max;" > comline_$USER.sas;
+	echo "%include '/data/prod/common/WRJ_macros/mk.globals.sas';" >> comline_$USER.sas;
+	echo "libname here '$PWD';" >> comline_$USER.sas;
+	nb=0
+	anycode=0
+	while read line
+	do
+		if [ "$line" == "" ]; then
+			nb=$((nb+1))
+		else
+			anycode=1
+			nb=0
+		fi
+		
+		if [[ $nb == 2 ]]; then
+			break
+		fi
+		echo "$line" >> comline_$USER.sas;
+	done
+	if [[ $anycode == 1 ]]; then
+		rm -f comline_$USER.lst
+		rm -f comline_$USER.log
+		sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM comline_$USER.sas &
+		wait $!
+		cat comline_$USER.lst 2> /dev/null
+		echo " ";
+	fi
+}
+
+# comr: re-open a SAS program created by 'com' (above) in vim for further editing
+# usage: type comr -- program will open in vim -- program will launch automatically
+# after saving and exiting (:wq).  To simply re-run without editing, add the 
+# optional argument 'r' after comr
+function comr () {
+	auto=0
+	if [ "$1" == "r" ]; then
+		auto=1
+		shift
+	fi
+	if [ "$1" == "" ]; then
+		pname="comline_$USER.sas"
+	else
+		pname="$1"
+	fi
+	sasname=""
+	lstname=""
+	logname=""
+	pnamestrip=$(echo "$pname" | cut -d'.' -f 1)
+	sasname+=$pnamestrip; sasname+=".sas"
+	lstname+=$pnamestrip; lstname+=".lst"
+	logname+=$pnamestrip; logname+=".log"
+	if [[ $auto == 0 ]]; then
+		vim $sasname;
+	fi
+	anycode=$(cat $sasname 2> /dev/null)
+	if [[ $(echo $anycode | grep -i 'do not run') == "" ]] && [[ $anycode != "" ]]; then
+		rm -f $lstname
+		rm -f $logname
+		sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM $sasname &
+		wait $!
+		cat $lstname 2> /dev/null
+		if [[ $? != 0 ]] || [[ ! -f $lstname ]]; then
+			python /data/prod/common/WRJ_macros/logcheck.py $logname
+		fi
+		echo " ";
+	fi
+}
+
+# cleanfile: save a copy of the target file (arg 1) with the prefix 'raw', then
+# overwrite the original file, removing all non-printable characters.
+function cleanfile {
+	mv "$1" "raw.$1"
+	cat "raw.$1" | tr -cd "[:print:]\n\t" > $1
+	echo "\n...$1 was cleaned - original is here: raw.$1\n"
+}
+
+# csv: display a csv file in a reasonably formatted way using 'less'
+function csv {
+	sed '1s/^\xEF\xBB\xBF//' "$@" | perl -pe 's/((?<=,)|(?<=^)),/ ,/g;' | column -t -s, | less -F -S -X -K
+}
+
+
+# show: display a date-sorted list of SAS programs (.sas) -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+function show {
+	if [ "$1" != "" ]; then
+		ls -alrt *.sas | grep -i "$1"
+	else
+		ls -alrt *.sas
+	fi
+}
+
+# showl: display a date-sorted list of SAS logs (.log) -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+function showl {
+	if [ "$1" != "" ]; then
+		ls -alrt *.log | grep -i "$1"
+	else
+		ls -alrt *.log
+	fi
+}
+
+# showd: display a date-sorted list of SAS datasets / views (.sas7b*) -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+function showd {
+	if [ "$1" != "" ]; then
+		ls -alrth *.sas7b* | grep -i "$1"
+	else
+		ls -alrth *.sas7b*
+	fi
+}
+
+# showdr: display a date-sorted list of SAS datasets / views (.sas7b*) -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+# same as 'showd', but recursive through current and child directories 
+function showdr {
+	if [ "$1" != "" ]; then
+		echo; find . -type f \( -iname "*$1*.sas7bdat" -o -iname "*$1*.sas7bvew" \); echo;
+	else
+		echo; find . -type f \( -name "*.sas7bdat" -o -name "*.sas7bvew" \); echo;
+	fi
+}
+
+# showr: display a date-sorted list of SAS programs (.sas) -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+# same as 'show', but recursive through current and child directories 
+function showr {
+	if [ "$1" != "" ]; then
+		echo; find . -type f \( -iname "*$1*.sas" \) | grep -v SASGSUB; echo;
+	else
+		echo; find . -type f \( -name "*.sas" \) | grep -v SASGSUB; echo;
+	fi
+}
+
+# showxr: display a date-sorted list of .xlsx and .csv files -- optionally, add
+# an argument for subsetting the list to just those matching that substring
+function showxr {
+	if [ "$1" != "" ]; then
+		find . -type f \( -iname "*$1*.csv" -o -iname "*$1*.xlsx" \)
+	else
+		find . -type f \( -name "*.csv" -o -name "*.xlsx" \)
+	fi
+}
+
+# sas: launch a specified SAS program (add & afterwards to place in background) 
+function sas {
+	if [ -f "$PWD/$1" ] && [[ $1 == *.sas ]] 2> /dev/null; then
+		python /data/prod/common/WRJ_macros/updt.sas.hx.py $PWD/$1
+		#echo $PWD/$1 >> .currently_running_$USER.txt
+		sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM $1
+		#cat .currently_running_$USER.txt | grep -v $PWD/$1 > .currently_running_$USER.txt
+		
+	else
+		echo ' '
+		echo 'You must specify a valid program to run!'
+		echo ' '
+	fi
+}
+
+alias sashx='python /data/prod/common/WRJ_macros/hx_summary.py manual'
+
+## NOTE: the following hcsv function displays the first 20 rows but is not useful for wide files! Use csv instead.
+function hcsv {
+	echo; echo -- first 20 rows of "$@" --; echo; sed '1s/^\xEF\xBB\xBF//' "$@" | perl -pe 's/((?<=,)|(?<=^)),/ ,/g;' | column -t -s, | head -n 20; echo;
+}
+
+# vec: vectorize (using the term loosely) a specified Python script over a set of target SAS datasets
+# usage: vec <alias to python script> <set of SAS datasets - you can use *, e.g., ptlev_*>
+function vec {
+	pyscript=$(alias "$1" | egrep -oh "/.*\.py")
+	#pyscript=$(which "$1")
+	#pyscript=$(echo $pyscript | cut -d' ' -f 3)
+	#pyscript=${pyscript::-1}
+	shift
+	flist="$@"
+	for f in $flist;
+	do
+		if [[ $f == *.sas7bdat ]] ; then
+			
+			python $pyscript $f;
+		else 
+			echo "WARNING: $f is not a valid SAS dataset."
+		fi
+	done
+}		
+
+# sasfind: look through body of .sas files for a specified string and display the program names
+# optionally, add ! as a 2nd argument to display the matching contents as well
+function sasfind {
+	echo;
+	if [ "$2" != "" ] && [ "$2" != "!" ]; then
+		echo "...searching $2 files for $1...";
+		echo;
+		if [ "$3" == "!" ]; then
+			grep -ir "$1" --include=*.$2 --exclude-dir=*GSUB* 
+		else
+			flist=$(grep -ilr "$1" --include=*.$2 --exclude-dir=*GSUB*)
+			if [[ $flist == "" ]]; then
+				echo; echo "...nothing found for that search!"; echo;
+			else
+				echo $flist | xargs ls -alrt;
+				echo;
+				echo "...NOTE: add ! as a last argument to see contents...";
+			fi
+		fi
+	else
+		echo "...searching .sas files for $1...";
+		echo;
+		if [ "$2" == "!" ]; then
+			grep -ir "$1" --include=*.sas --exclude-dir=*GSUB*
+		else
+			flist=$(grep -ilr "$1" --include=*.sas --exclude-dir=*GSUB*)
+			if [ "$flist" == "" ]; then
+				echo; echo "...nothing found for that search!"; echo;
+			else
+				echo $flist | xargs ls -alrt;
+				echo;
+				echo "...NOTE: add ! as a last argument to see contents...";
+			fi
+		fi
+	fi
+	echo;
+}
+
+# savedir: save the current working directory as the shell variable \$s<n>
+# where <n> is a sequentially assigned number
+# the aliases 's<n>' and 'ps<n>' will also be saved to cd and pushd to this
+# directory later.  NOTE: this function has been aliased as 's'
+savedir() {
+	declare -i dirn=1
+	sdirn=s$dirn
+	while test "${!sdirn}" != ""; do
+		if [ "$PWD" == "${!sdirn}" ]; then
+			break
+		fi
+		dirn=$dirn+1
+		sdirn=s$dirn
+	done
+	declare -g $sdirn="$PWD"
+	echo "alias $sdirn='cd \"$PWD\"'" >> ~/.tmp_aliases;
+	echo "alias p$sdirn='pushd \"$PWD\"'" >> ~/.tmp_aliases; 
+	. ~/.tmp_aliases
+	echo
+	echo "SAVED ($sdirn): ${!sdirn}"
+	echo
+}
+
+# retrdir: display currently saved directory list created by 'savedir' above
+# NOTE: this function has been aliased as 'S' (capital)
+retrdir() {
+	echo 
+	echo "-- list of saved directories --"
+	declare -i n=1
+	sn=s$n
+	while test "${!sn}" != ""; do
+		echo "\$$sn : ${!sn}"
+		n=$n+1
+		sn=s$n
+	done
+	echo
+}
+
+# cleardir: clear the currently saved directory shell variables and aliases
+# created by 'savedir' above - NOTE: this function has been aliased as 'sclean'
+cleardir() {
+	echo
+	declare -i n=1
+	sn=s$n
+	while test "${!sn}" != ""; do
+		unset s$n
+		unalias s$n
+		unalias ps$n
+		n=$n+1
+		sn=s$n
+	done
+	echo "-- cleared saved directories --"
+	echo
+	echo "" > ~/.tmp_aliases
+	source ~/.tmp_aliases
+	rm -f ~/.tmp_aliases
+}
+
+alias s='savedir'
+alias S='retrdir'
+alias sclear='cleardir'
+
+wiki () {
+	python /data/prod/common/WRJ_macros/use_wiki.py "$@";
+	source ~/.wiki_aliases
+}
+
+alias saswait='sasgsub -GRIDSASOPTS "(-sysparm $PWD)" -GRIDWAITRESULTS -GRIDSUBMITPGM'
+alias gstat='sasgsub -GRIDGETSTATUS ALL'
+alias SAS='sasgsub -GRIDGETSTATUS ALL'
+alias gget='sasgsub -GRIDGETRESULTS'
+alias gkill='sasgsub -GRIDKILLJOB'
+
+alias lsdall='ls -alrtd */'
+alias lsd='ls -alrtd */ | grep -v SASGSUB'
+
+alias showx='echo; echo --- XLSX ---; echo; ls -alrt *.xlsx; echo; echo --- CSV ---; echo; ls -alrt *.csv; echo;'
+alias showi='echo; echo --- IMAGE FILES ---; echo; ls -alrt *.tiff *.png *.bmp *.jpeg *.jpg *.html *.pdf; echo;'
+alias cpbash='cp ~/.bashrc ~/COPY_BASH'
+alias load='w | grep load\ average | grep -v grep'
+alias gridw='pushd /data/gridshare; ls -alrtd */ | grep -v SASGSUB; popd'
+
+
+alias ns='python /data/prod/common/WRJ_macros/newsas.py'
+alias tree='python /data/prod/common/WRJ_macros/mkdirtree.py'
+alias cleanup='sh /data/prod/common/WRJ_macros/cleanup.sh'
+
+. ~/gotodirs.sh
+alias goto='source ~/gotodirs.sh; gotodir'
