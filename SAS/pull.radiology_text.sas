@@ -154,7 +154,7 @@ libname feas "&PROJROOT/Data/feas";
 				inner join
 				(select patientSID, examdatetime, radiologynuclearmedicinereportSID, radiologyProcedureSID, 
 				radiologydiagnosticCodeSID
-				FROM [ORD_Davies_202110040D].[Src].[Rad_RadiologyExam] 
+				FROM [&PROJ].[Src].[Rad_RadiologyExam] 
 				WHERE
 					examDateTime>=@startdt
 					and
@@ -379,24 +379,6 @@ end;
 keep patientICN; 
 run; */
 
-* update 26 Jan 2023 -- now using Nabins 'finderfilea' dataset which has the following attrition 
-flags already created:
-
-step                            before      removed
-
-flag00_alive_01mar18        10,893,614      892,913
-flag01_age                  10,000,701    4,634,488
-flag02_veteran               5,366,213      422,512
-flag03_enrolled_1yrprior     4,943,701      678,607
-flag04_enc_2yr               4,265,094      575,919
-flag05_current_smok          3,689,175    2,858,571
-flag06_nolungdxprior           830,604        8,845
-flag07_lungdxindex_mar22       821,759      803,698
-FINAL POP                       18,061            .
-
-
-... to this, we will slightly modify to require 2+ years of enrollment rather than 1 ;
-
 libname lc "&PROJROOT/Data/LC";
 
 data firstlungdx;
@@ -404,35 +386,9 @@ set lc.finder_fileA;  * note this is patient level, not event level ;
 IF min(of flag:) AND ('01Mar2022'd-first_enroll)>=730;
 run;
 
-** note -- incident cancer dx dates were found for the period 01Mar2018 through 31Aug2022 - 
+/** note -- incident cancer dx dates were found for the period 01Mar2018 through 31Aug2022 - 
 corresponding radiology reports are pulled here for that period shifted 
-backwards by 6 months, i.e., 01Sep2017 through 28Feb2022 (last start 01Feb) ;
+backwards by 6 months, i.e., 01Sep2017 through 28Feb2022 (last start 01Feb) */
 %dateloop(firststart=01Sep2017, laststart=01Feb2022, interval=month, intmult=1, 
-	dxeventfile=lc.finder_filea, dxeventdatevar=dx_date_CA);
+	dxeventfile=firstlungdx, dxeventdatevar=dx_date_CA);
 
-
-
-/*
-
-select stack.patientSID, stack.radiologynuclearmedicineReportSID, stack.reportText,
-re.radiologydiagnosticCodeSID, rdx.RadiologyDiagnosticCode, 
-rdx.RadiologyDiagnosticCodeDescription from
-  (
-  select patientSID, radiologynuclearmedicineReportSID, impressiontext as reportText
-  FROM [ORD_Davies_202110040D].[Src].[SPatientText_RadiologyImpressions]
-  union all
-  select patientSID, radiologynuclearmedicineReportSID, reportText
-  FROM [ORD_Davies_202110040D].[Src].[SPatientText_RadiologyReportText]) stack
-  inner join
-  (select patientSID, radiologynuclearmedicinereportSID, radiologydiagnosticCodeSID
-  FROM [ORD_Davies_202110040D].[Src].[Rad_RadiologyExam]) re
-  on stack.patientSID=re.patientSID 
-  and 
- stack.radiologynuclearmedicineReportSID=re.radiologynuclearmedicineReportSID
- left join
- CDWWork.Dim.RadiologyDiagnosticCode rdx
- on re.RadiologyDiagnosticCodeSID=rdx.RadiologyDiagnosticCodeSID
-
-*str(reportText like '%chest CT%' or reportText like '%chest x%' or reportText like '%CXR%' 
-				or reportText like '%biopsy%' or reportText like '%bx%'
-*/
