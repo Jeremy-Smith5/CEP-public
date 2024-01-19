@@ -275,6 +275,7 @@
 		;
 	set &srclib..&srcdat (keep=&flaglist) END=LAST;
 	array _F {&nf} _temporary_; * flag counts ;
+ 	retain _F 0;
 	array _FL {&nf} $&label_len _temporary_; * flag labels ; /* NN: original hard-coded length was 75 */
 	array _FLOG {&nf} $100 _temporary_; * flag logic ;
 	array isnum {&nf} _temporary_ (&isnum); * numeric var indicators ;
