@@ -20,7 +20,10 @@
 	Oct 2022
 
 	<INDATA> contains:
-		<IDVAR> (must be integer) -- this identifies a given polygon
+		<IDVAR> (must be integer) -- this identifies a given polygon (defined over 
+  			multiple rows)
+  		X - x-coordinate
+    		Y - y-coordinate
 		<LABELVAR> -- this is optional - if omitted, a new variable LAB will be created 
 			that is just the character representation of the value in <IDVAR>
 		ROTATE: a positive or negative number - if missing value, will be reset to 0
@@ -36,6 +39,9 @@
 
 	EXAMPLE CALL:
 		/data/prod/common/WRJ_macros/test.shiftrotate.sas
+
+  	UPDATE 26 Mar 2024 - added an example call for animating a set of vertices and displaying 
+   	with SGPLOT POLYGON statement.
 
 	======================================================================================== */
 
@@ -135,7 +141,7 @@
 			output;
 		end;
 	end;
-	keep &idvar &labelvar rnum x y xshift yshift rotate anymove %if &newcenter %then center_x_new center_y_new; &othvars;
+	keep &idvar &labelvar rnum x y xshift yshift rotate anymove scale %if &newcenter %then center_x_new center_y_new; &othvars;
 	run;
 
 	%if &keep_pre %then %do;
@@ -171,3 +177,91 @@
 			
 %MEND; *shiftrotate();
 
+/* 
+*** THE FOLLOWING IS AN EXAMPLE CALL ADDED 26 MAR 2024 - 
+here, creating a simple shapefile with instructions to move up
+and to the right, shrinking to 95% of original size.  The animate
+macro defined below then repeats this process N times and displays
+with SGPLOT.   */
+
+data VTshape;
+infile cards dlm=',' dsd truncover firstobs=1;
+length seg 3 slab $2 x y rotate scale xshift yshift /*center_x_new center_y_new*/ 8;
+input seg slab x y rotate scale xshift yshift /*center_x_new center_y_new*/;
+cards;
+1,VT,3,3,5,0.95,20,20
+1,VT,10,3,5,0.95,20,20
+1,VT,12,18,5,0.95,20,20
+1,VT,14,25,5,0.95,20,20
+1,VT,3,25,5,0.95,20,20
+1,VT,3,3,5,0.95,20,20
+;
+run;
+
+data orig;
+set VTshape;
+run;
+
+%macro animate(indata=, ntimes=, randomize=0);
+			
+	proc datasets lib=work memtype=data nolist nodetails;
+	SAVE &indata orig;
+	run; quit;
+	
+	proc sql noprint; select count(*) into :shaperecs trimmed from &indata; quit;
+
+	%do move=1 %to &ntimes;
+
+		%if &move>1 %then %do;
+			data 
+				prior (drop=rotate scale xshift yshift 
+					rename=(_ro=rotate _scale=scale _xs=xshift _ys=yshift))
+				&indata (drop=n anymove rotate scale xshift yshift 
+					rename=(_ro=rotate _scale=scale _xs=xshift _ys=yshift))
+				;
+			set SR;
+			retain _ro _scale _xs _ys;
+			if _N_<=&shaperecs then output prior;
+			else if _N_=&shaperecs+1 then do;
+				_ro=rotate; _scale=scale; _xs=xshift; _ys=yshift;
+				%if &randomize %then %do;
+					do while (1);
+						_ro=rand('normal')*50;
+						_scale=rand('normal')+1;
+						_xs=rand('normal')*5;
+						_ys=rand('normal')*5;
+						if _scale>0.1 then leave;
+					end;
+				%end;
+			end;
+			if _N_>&shaperecs then output &indata;
+			run;
+			
+			proc append data=prior base=all_priors; run;
+			
+			proc datasets lib=work memtype=data nolist nodetails;
+			SAVE &indata all_priors orig;
+			run; quit;
+		%end;
+
+		%shiftrotate(
+			indata=&indata,
+			idvar=seg,  /* IMPORTANT: this is assumed to be an integer! */
+			labelvar=slab,
+			keep_pre=1,
+			othvars=	/* list of extra vars (aside from ID SEG LAB X Y), if any, to keep from <INDATA> */
+			);
+			
+	%end;
+	
+	proc append data=SR base=all_priors; run;
+		
+	proc sgplot data=all_priors NOAUTOLEGEND;
+	polygon X=x Y=y id=seg / label=slab fill outline;
+	run;
+	
+%mend; *animate();
+
+options mprint;
+%animate(indata=VTshape, ntimes=20, randomize=1);
+%animate(indata=orig, ntimes=20, randomize=0);
