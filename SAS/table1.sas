@@ -102,21 +102,21 @@
 	that it will create levels by concatenating the variable NAME with the variable VALUE, e.g.,
 	if you have a variable RACE with levels 'black', 'white', 'asian'... , the resulting auto-
 	created levels will be 'RACE_black', 'RACE_white', 'RACE_asian', etc.  Keep this in mind 
-	when thinking about the resulting variable lengths!
+	when thinking about the resulting variable lengths.
 
 	MAKE SURE, if you are using more than one stratifying variable, that there is no overlap
 	between the variables in terms of level names!  This will cause errors.  For this reason,
 	avoid generic level names for stratifying variables such as 'OTHER', 'NONE', etc.
 
 	NOTE this macro just produces a temporary (WORK) dataset called 'table1', so don't forget
-	to save the output after the macro call!
+	to save the output after the macro call.
 
 	UPDATE Feb 2021: added option to create p-values for certain comparisons:
 		- Cochran Mantel Haenszel chi sq for categorical variables
 		- T-tests for comparison of means (ONLY if one stratifying variable with two levels)
 		- Kruskal Wallis for comparison of medians (ONLY if one stratifying variable with two levels)
 	
-	UPDATE May 2021: added option to create standardized mean difference values for comparison of means and row-wise proportions
+	UPDATE May 2021: added option to create standardized mean difference values for comparison of means and proportions.
 
 	UPDATE 2022: added option for ROWVARS that allows use of an '@' sign as a wildcard (which works here
 		the same way as the usual SAS ':' wildcard.  So instead of typing out a list of 
@@ -126,10 +126,21 @@
 			...instead of 
 			rowvars=age:fage | age/mean | priority | conf_ca | conf_chf | conf_copd | conf_dm | ever_hosp
 
-	NOTES on PrintSMD option:
-		1. Quantitative variables must be specified with '/mean std' as the requested statistics. Othwerwise, SMD will not print.
-		2. If you want a single SMD for a categorical variables with >2 levels, see the %stddiff macro (stddiff.sas). PrintSMD only supports row-wise SMDs.
-		3. PrintSMD is only valid for two-level stratifying variables
+	UPDATE June 2024: expanded standardized mean difference (SMD) utility to allow for all pairwise comparisons in the case that
+		there are more than 2 total levels for stratifying variables - see details below.
+
+	NOTES on PrintSMD option (see more details in code):
+		1. Quantitative variables must be specified with '/mean std' as the requested statistics. Othwerwise, SMD will not be calculated.
+		2. If the combination of stratifying variables and their respective levels produces >2 columns (aside from the overall total), printSMD
+			will produce separate calculations for all pair-wise comparisons (only some of which will be useful) - variable names for these
+			will be as follows: SMD_1v2, SMD_1v3, SMD_2v3, etc., with names corresponding to the position of columns in the output table.
+		3. The grand total columns, ALL and ALL_2, will not be included in the SMD comparisons.
+		4. If concatenations of pairwise column names are all <= 29 in length, SMD variables will named using actual column var names (instead of SMD_1v2, 
+			etc.).  If ANY are too long, then SMD_1v2-style names will be used for all and descriptive *labels* will be applied to each - in this case, 
+			a proc contents of these variables will be printed in the .lst output for this macro.
+	
+	UPDATE Sept 2024: added WTVAR option for optionally specifying a numeric variable containing a person-level weight, e.g., a propensity score
+	
 
 	Sample call:
 		
@@ -160,8 +171,6 @@
 	Jeremy Smith
 	Feb 2018
 	
-	Last update: Dec 2022
-	
 	======================================================================================== */
 
 %macro isCharacter(chkchar);
@@ -186,16 +195,36 @@
 	personfile=,	/* name of person-level input file containing STRATVARS and ROWVARS */
 	stratvars=,		/* pipe-separated list of stratifying variables as described above */
 	rowvars=,		/* pipe-separated list of row variables as described above */
+	wtvar=,		/* variable, if any, containing person-level weight -- EXPERIMENTAL! */
 	uselabels=0,	/* if set to 1 and variable label on input dataset (<personfile>) is <=32 characters, use var label instead of name */
 	usecase=0,	/* if set to 1, use case of variable name as provided in macro call (unless using label) */
 	pvalues=0,	/* 1: will perform an M-H chi-square test for categorical variables, a T-test for 2-way means, KW for 2-way medians */
-	printSMD=0
-	);
+	printSMD=0,	/* calculate standardized mean differences for pairwise-comparisons across strata */
+	outsuff=	/* if present, string which will be appended to output dataset name, i.e., WORK.table1&outsuff - an underscore will 
+			be prepended automatically */
+	);	/* output: WORK.table1 or WORK.table1_<outsuff> */
 
 	options minoperator;
+
+	proc sql noprint;
+	select memname into :worktabs separated by ' '
+	from dictionary.tables
+	where libname='WORK';
+	quit;
+
+	%if %length(&outsuff) %then %do;
+		%if %sysfunc(char(&outsuff,1))^=_ %then %do;
+			%let outsuff=_&outsuff;
+		%end;
+	%end;
 	
 	data pfile_temp;
 	set &personfile;
+	%if %length(&wtvar)=0 %then %do;
+		%let wtvar=wtvar;
+		length wtvar 3;
+		wtvar=1; * i.e., no weighting - everyone has weight of 1 ;
+	%end;
 	run;
 	
 	proc sql;
@@ -207,7 +236,8 @@
 	
 	%let nstrat=%eval(%sysfunc(countc(&stratvars,|))+1);
 
-	%if &printSMD^=1 or &nstrat>2 %then %let printSMD=0;;
+	%let multiSMD=0;
+	%if &printSMD^=1 or &nstrat>2 %then %let multiSMD=1;;
 
 	%let svarlist=;
 	%let qsvarlist=;
@@ -219,7 +249,6 @@
 		%if %index(&sraw,:) %then %do;
 			%let S&i=%scan(&sraw,1,:);
 			%let Sf&i=%scan(&sraw,2,:);
-			*isVNfriend(&&Sf&i,F);
 			%isCharacter(&&S&i);
 			%if &ischaracter and %substr(&&SF&i,1,1)^=$ %then %do; %let Sf&i=$&&Sf&i; %end;
 		%end;
@@ -252,14 +281,14 @@
 			%end;
 		%end;
 		%let Sf&i=%sysfunc(compress(&&Sf&i));
-		/*%if &isCharacter=0 %then %do;*/
-			data pfile_temp (rename=(&&S&i..2=&&S&i));
-			set pfile_temp;
-			&&S&i..2=put(&&S&i,&&Sf&i...);
-			if missing(&&S&i..2) then &&S&i..2='z';
-			drop &&S&i;
-			run;
-		/*%end;*/
+	
+		data pfile_temp (rename=(&&S&i..2=&&S&i));
+		set pfile_temp;
+		&&S&i..2=put(&&S&i,&&Sf&i...);
+		if missing(&&S&i..2) then &&S&i..2='z';
+		drop &&S&i;
+		run;
+		
 		%let svarlist=&svarlist &&S&i;
 		%let qsvarlist=&qsvarlist %sysfunc(compress("&&s&i"));	
 	%end; *nstrat loop;
@@ -270,17 +299,10 @@
 		select (count(distinct &S1)=2) into :ttestOK from pfile_temp;
 		quit;
 	%end;
-	%if &printSMD=1 %then %do;
-		%if &ttestOK=0 %then %do;
-			%let printSMD=0;
-			%put ::: sorry, printSMD only works when there is 1 stratifying variable and it has only 2 levels ;
-		%end;
+	%if &ttestOK=0 %then %do;
+		%let multiSMD=1;
 	%end;
 
-	/*
-	%if %substr(&rowvars,%length(&rowvars),1)=| %then %do;
-		%let rowvars=%substr(&rowvars,1,%eval(%length(&rowvars)-1));
-	%end;*/
 	%let nvars=%eval(%sysfunc(countc(&rowvars,|))+1);
 
 	data _null_;
@@ -320,13 +342,6 @@
 				T[_N_]=name;
 				if last then call symputx("wcvars",catx('|', of T[*]));
 				run;
-				
-				/*
-				proc sql noprint;
-				select name into :wcvars separated by '|'
-				from dictionary.columns where libname='WORK'
-				and upcase(memname)='PFILE_TEMP' and upcase(substr(name,1,&_lrv-1))=substr("&_rv",1,&_lrv-1);
-				quit; */
 				
 				%put ::: the table1 macro expanded the wildcard variable &_rv;
 				%let rowvars=&rowvars &wcvars;
@@ -533,6 +548,7 @@
 			run;
 
 			proc means data=pfile_slice completetypes chartype NOPRINT;
+			WEIGHT &wtvar;
 			class %do x=1 %to &nstrat; &&S&x %end; / preloadfmt;
 			var %if &vtype=F %then _miss; &dummies;
 			output out=means_slice
@@ -562,6 +578,7 @@
 						run;
 					%end; 
 					proc freq data=pfile_temp;
+					WEIGHT &wtvar;
 					%if &isRedo %then %do;
 						format &V fMISSval.;
 					%end;
@@ -607,6 +624,7 @@
 				%abort;
 			%end;
 			proc means data=pfile_temp completetypes chartype NOPRINT;
+			WEIGHT &wtvar;
 			class %do x=1 %to &nstrat; &&S&x %end; / preloadfmt;
 			var &V;
 			output out=means_slice
@@ -623,6 +641,7 @@
 				%if &doMean %then %do;
 					ods output TTests=pval;
 						proc ttest data=pfile_temp;
+						WEIGHT &wtvar;
 						class &S1;
 						var &V;
 						run;
@@ -647,6 +666,7 @@
 				%else %if &doMedian %then %do;
 					ods output KruskalWallisTest=pval;
 						proc npar1way data=pfile_temp;
+						WEIGHT &wtvar;
 						class &S1;
 						var &V;
 						run;
@@ -750,7 +770,10 @@
 				call symputx("ncols",ncols);
 			end;
 			run;
+
 		%end;
+
+		%put ::: COLVARS: &colvars;
 
 		data means_slice (keep=var lvl &varorder has_missing test_stat test_stat_val pval);
 		set means_slice END=LAST;
@@ -765,7 +788,7 @@
 		do i=1 to dim(CL,1);
 			CL[i, _N_]=levs[i];  
 		end;
-		F[_N_]=_freq_;
+		F[_N_]=sum(of &vlevs);
 		if last then do;
 			var="&V";
 			has_missing='';
@@ -818,6 +841,10 @@
 			end;
 		end;
 		run;
+
+		title 'means_slice';
+		proc print data=means_slice heading=v width=min; run;
+		title;
 
 		data means_slice;
 		length vtype $1;
@@ -952,27 +979,285 @@
 		run;
 	%end;
 	
-	data table1; set table1; drop vtype; run;
-	
-	%if &printSMD = 1 %then %do;
-		/* 
-		SMD CODE STARTS HERE -- the following is adapted from Ethan Powells SMD algorithm / macros.
- 
-		-- if row contains means and standard deviations...
-			* calculate SMD as 100*(Xt-Xc) / sqrt( (St**2 + Sc**2)/2 ) ...
-				where Xt and Xc are the mean values of treatment and control groups, respectively
-				and
-				St and Sc are the standard deviations of treatment and control groups, respectively
-		-- if row contains counts and percentages...
-			* calculate SMD as 100*(Pt-Pc) / sqrt( (Pt*(1-Pt) + Pc*(1-Pc))/2 ) ...
-				where Pt and Pc are the proportions (percentages) of treatment and control groups, respectively */
-		data table1;
+	%if &printSMD=1 %then %do;
+		
+		proc sql noprint;
+		select name into :klist separated by ' '
+		from dictionary.columns
+		where libname='WORK' and lowcase(memname)='table1'
+		and lowcase(name) NOT in ('vtype', 'var', 'lvl', 'all', 'all_2', 'has_missing', 'pval', 'test_stat', 'test_stat_val');
+
+		select count(*) into :hm trimmed
+		from dictionary.columns
+		where libname='WORK' and lowcase(memname)='table1'
+		and lowcase(name)='has_missing';
+		quit;
+
+		data 
+			table1 (drop=nlevs fmtname type start invar_name lastmiss)
+			forSMD (keep=rownum vtype nlevs invar_name lvl &klist)
+			mergerows (keep=fmtname type start rownum rename=(rownum=label))
+			;
+		retain fmtname 'fvar2row' type 'C';
+		length start $32 rownum nlevs 4 invar_name $32;
 		set table1;
-		array p {0:2} &colvars;		* primary statistics ;
-		array s {0:2} &colvars2;	* secondary statistics ;
-		if lowcase(lvl)='mean stddev' then SMD = 100*(p[2] - p[1]) / sqrt((s[2]**2 + s[1]**2)/2);
-		else if cmiss(var,lvl)=1 or lvl in ('(missing)','(none)') then SMD = 100*(s[2] - s[1]) / sqrt((s[2]*(1-s[2]) + s[1]*(1-s[1]))/2);
+		rownum=_N_;
+		%if &hm=0 %then %do;
+			length has_missing $1;
+			has_missing='';
+		%end;
+		retain nlevs invar_name start;
+		if missing(var) then nlevs+(lvl^='(none)');
+		else if vtype='S' then do;
+			nlevs=.;
+			invar_name=catx('#',var,rownum);
+		end;
+		else if _N_>1 then do;
+			nlevs=(max(of &klist)>.);
+			invar_name=catx('#',var,rownum);
+		end;
+		lastmiss=lag(has_missing);
+		if _N_>1 and not missing(var) and lastmiss^='Y' and (vtype in ('D', 'F') or (vtype='S' and lowcase(lvl)='mean stddev')) then do;
+			start=catx('#',var,rownum);
+			output mergerows;
+		end;
+		if _N_>1 and lvl^='(none)' and max(of &klist)>. and lastmiss^='Y' then output forSMD;
+		output table1;
 		run;
-	%end;
+
+		proc format cntlin=mergerows; run;
+
+		proc sql noprint;
+		select distinct invar_name into :vlist separated by ' ' from forSMD;
+
+		select count(distinct invar_name) into :nv trimmed from forSMD;
+
+		create table forSMD as
+		select a.*, b.totlevs, b.ismean, b.is2lev, b.isMulti
+		from
+			forSMD A
+			inner join
+			(select invar_name, max(nlevs) as totlevs, 
+			max((vtype='S')*(lowcase(lvl)='mean stddev')) as ismean,
+			max(vtype='D') as is2lev, max((vtype='F')*(nlevs>2)) as isMulti  /* note: '(none)' rows do not contribute to nlevs */
+			from forSMD group by invar_name) B
+			on a.invar_name=b.invar_name
+		order by a.rownum;
+		quit;
+
+		data forSMD;
+		set forSMD;
+		if totlevs=2 then is2lev=1;  /* rows where vtype=F and totlevs=2, e.g., sex=F, sex=M */
+		run;
+
+		* number of column variables containing 2ndary stats (e.g., percentages) ;
+		%let ncv=%sysfunc(countW(&colvars2,' '));
+		* by definition, the colvar in the first position is the overall column, which will always be skipped ;
+		%let ncombos=%sysevalf((&ncv-1)*(&ncv-2)/2);
+		%let zpad=%length(&ncv); * e.g., if number of column vars (ncv) equals 14, return 2 - if 8, return 1 ;
+
+		%let toolong=0;
+
+		%do vnum=1 %to &nv;
+
+			%let vnm=%scan(&vlist,&vnum,' ');
+			* get # of levels for <VNM> minus 1 (i.e., excluding the ref level, for which we are using the last level) ;
+			proc sql noprint;
+			select max(nlevs)-1 into :nlevs trimmed from forSMD WHERE invar_name="&vnm";
+
+			select case when isMean then 'M' when is2lev then '2' when isMulti then '3' else 'x' end 
+			into :comptype trimmed from forSMD where invar_name="&vnm";
+			quit;
+
+			%if &comptype=x %then %goto nextvnum;
+
+			data varlev_smd;
+			length rownum 4 invar_name $32;
+			invar_name="&vnm";
+			rownum=put(invar_name,$fvar2row.);
+			run;
+
+			%do cvi=2 %to %eval(&ncv-1);
+				%let cvi_name=%scan(&colvars2,&cvi,' ');
+				%let prim_cvi_name=%scan(&colvars,&cvi,' ');
+	
+				%do cvj=%eval(&cvi+1) %to &ncv;
+
+					data _null_;
+					* zero-padded CVi and CVj - for labeling purposes ;
+					call symputx("Zcvi",put(&cvi,z&zpad..));
+					call symputx("Zcvj",put(&cvj,z&zpad..));
+					run;
+
+					%let cvj_name=%scan(&colvars2,&cvj,' ');
+					%let prim_cvj_name=%scan(&colvars,&cvj,' ');
+
+					* only do comparisons where neither or both CVI_NAME and CVJ_NAME contain the string _ALL_ ;
+					* i.e., if the sum below is 1, skip this combination and move to the next ;
+					data _null_;
+					call symputx("nocomp",((index("&cvi_name","_ALL_")>0)+(index("&cvj_name","_ALL_")>0))=1);
+					run;
+
+					%if &nocomp %then %goto nextcombo;
+
+					%let SMD=.;
+
+					%if &comptype=M %then %do;
+
+						data SMD;
+						set forSMD (keep=rownum nlevs invar_name lvl &prim_cvi_name &cvi_name &prim_cvj_name &cvj_name
+								WHERE=(invar_name="&vnm"));
+						SMD=(&prim_cvj_name-&prim_cvi_name) / sqrt((&cvj_name**2 + &cvi_name**2)/2);
+						call symputx("SMD",SMD);
+						run;
+
+					%end;
+					%else %if &comptype=2 %then %do;
+
+						data SMD;
+						set forSMD (keep=rownum nlevs invar_name lvl &cvi_name &cvj_name
+								WHERE=(invar_name="&vnm"));
+						SMD=(&cvj_name-&cvi_name) / sqrt((&cvj_name*(1-&cvj_name) + &cvi_name*(1-&cvi_name))/2);
+						call symputx("SMD",SMD);
+						run;
+
+					%end;
+					%else %do;
+
+						* NOTE: for, e.g., a 4-level variable (age 18-34, 35-54, 55-64, 65+), 65+ will be the ref. level
+						and the value of <NLEVS> will be 3 (based on calculation further up).  The input dataset below
+						will have all 4 rows - however, note that the logic below only incorporates the first 3 into 
+						arrays t and c - i.e., only where NOT on the last row.  ;
+
+						*** NOTE: '(missing)' levels will be incorporated into this calculation whereas '(none)' levels will not.
+
+						*** NOTE: unlike the two calculations above (for comparing continuous or two-level categorical variables),
+						the SMDs calculated for multi (>2)-level categorical variables are absolute values - mathematically,
+						this calculation cannot produce a negative value.  The code below (in particular, the PROC IML step)
+						is an adaptation of the k-level Mahalanobis distance method used by Yang & Dalton described here:
+						https://support.sas.com/resources/papers/proceedings12/335-2012.pdf ;
+
+						data SMD (keep=t1-t&nlevs c1-c&nlevs);
+						set forSMD (keep=rownum nlevs invar_name lvl &cvi_name &cvj_name WHERE=(invar_name="&vnm")) end=last;
+						* CVi_NAME will be considered (t)reatment and CVj_NAME will be (c)ontrol ;
+						array t {*} t1-t&nlevs;
+						array c {*} c1-c&nlevs;
+						retain t c;
+						if not last then do;
+							t[_N_]=&cvi_name;
+							c[_N_]=&cvj_name;
+						end;
+						else output SMD;
+						run;
+
+						%let SMDmsg=;
+
+						proc iml;
+						use work.SMD;
+						read all var {%do v=1 %to &nlevs; t&v %end;} into t;
+						read all var {%do v=1 %to &nlevs; c&v %end;} into c;
+						close work.SMD;
+						cv=j(&nlevs,&nlevs,0);
+						do i=1 to &nlevs;
+							do j=1 to &nlevs;
+								if i=j then cv[i,j]=0.5*(t[i]*(1-t[i]) + c[i]*(1-c[i]));
+								else cv[i,j]=-0.5*(t[i]*t[j] + c[i]*c[j]);
+							end;
+						end;
+						tc=t-c;
+						if det(cv) then do;
+							cv=inv(cv);
+							tc_cv=T(tc#cv); * tc_cv is the matrix product (not dot product) of tc and cv ;
+							sum_tc_cv=tc_cv[+,]; * e.g., for tc_cv={3 5, 7 1}, return: {10 6} ;
+							SMD=sqrt(sum(sum_tc_cv#tc));
+							call symputx("SMD",SMD);
+						end;
+						else call symputx("SMDmsg","::: SMD is not calculable for &vnm: &prim_cvi_name vs. &prim_cvj_name");
+						quit;
+
+						%put &SMDmsg;
+
+					%end;
+
+					proc datasets lib=work memtype=data nolist nodetails; delete SMD; run; quit;	
+					
+					%let SMDname=SMD_&prim_cvi_name._vs_&prim_cvj_name;
+					%let SMDshort=SMD_&Zcvi._vs_&Zcvj;
+					%if %length(&SMDname)>32 %then %let toolong=1;;
+
+					data varlev_smd;
+					set varlev_smd;
+					length &SMDshort 8;
+					&SMDshort=&SMD;
+					label &SMDshort="&SMDname";
+					run;
+
+					%nextcombo:
+
+				%end; *cvj;
+
+			%end; *cvi;
+
+			proc append data=varlev_smd base=all_varlev_smd; run;
+			
+			proc datasets lib=work memtype=data nolist nodetails; delete varlev_smd; run; quit;	
+
+			%nextvnum:
+
+		%end; *vnum;
+
+		%if &toolong=0 %then %do;
+
+			* all SMD name combinations were <= 32 characters long, so replace existing SMD var names with their corresponding labels ;
+			data _null_;
+			set all_varlev_smd (obs=1 keep=SMD_:);
+			array V {*} SMD_:;
+			array tRN {&ncombos} $65 _temporary_;
+			do i=1 to dim(V);
+				tRN[i]=catx('=',vname(V[i]),vlabel(V[i]));
+			end;
+			call symputx("SMD_rename",catx(' ',of tRN[*]));
+			run;
+	
+			data all_varlev_smd;
+			set all_varlev_smd;
+			rename &SMD_rename;
+			run;
+
+		%end;
+
+		proc sort data=table1; by rownum; run;
+
+		proc sort data=all_varlev_smd; by rownum; run;
+
+		data table1;
+		merge
+			table1 (in=A)
+			all_varlev_smd (in=B drop=invar_name)
+			;
+		by rownum;
+		IF A;
+		drop rownum;
+		run;
+
+		proc datasets lib=work memtype=data nolist nodetails; delete all_varlev_smd; run; quit;
+
+		%if &toolong %then %do;
+			%put ::: SMD variable labels were printed to the .lst file ;
+			title "SMD variables";
+			ods select variables;
+			proc contents data=table1 (keep=SMD_:); run;
+			ods select all;
+			title;
+		%end;
+
+	%end; *printSMD;
+
+	data table1; set table1; drop vtype; run;
+
+	proc datasets lib=work memtype=data nolist nodetails; 
+	CHANGE table1=table1&outsuff; 
+	SAVE &worktabs table1&outsuff; 
+	run; quit;
 
 %MEND; *table1();
