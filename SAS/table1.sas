@@ -907,7 +907,9 @@
 		%end;
 
 		data means_slice;
+  		length _vraw $32;
 		set means_slice;
+  		_vraw=var;
 		if var^='Pop' and not missing(var) then var="&vrawlabel";
 		run; 
 
@@ -985,7 +987,7 @@
 		select name into :klist separated by ' '
 		from dictionary.columns
 		where libname='WORK' and lowcase(memname)='table1'
-		and lowcase(name) NOT in ('vtype', 'var', 'lvl', 'all', 'all_2', 'has_missing', 'pval', 'test_stat', 'test_stat_val');
+		and lowcase(name) NOT in ('vtype', '_vraw', 'var', 'lvl', 'all', 'all_2', 'has_missing', 'pval', 'test_stat', 'test_stat_val');
 
 		select count(*) into :hm trimmed
 		from dictionary.columns
@@ -1010,15 +1012,15 @@
 		if missing(var) then nlevs+(lvl^='(none)');
 		else if vtype='S' then do;
 			nlevs=.;
-			invar_name=catx('#',var,rownum);
+			invar_name=catx('#',_vraw,rownum);
 		end;
 		else if _N_>1 then do;
 			nlevs=(max(of &klist)>.);
-			invar_name=catx('#',var,rownum);
+			invar_name=catx('#',_vraw,rownum);
 		end;
 		lastmiss=lag(has_missing);
-		if _N_>1 and not missing(var) and lastmiss^='Y' and (vtype in ('D', 'F') or (vtype='S' and lowcase(lvl)='mean stddev')) then do;
-			start=catx('#',var,rownum);
+		if _N_>1 and not missing(_vraw) and lastmiss^='Y' and (vtype in ('D', 'F') or (vtype='S' and lowcase(lvl)='mean stddev')) then do;
+			start=catx('#',_vraw,rownum);
 			output mergerows;
 		end;
 		if _N_>1 and lvl^='(none)' and max(of &klist)>. and lastmiss^='Y' then output forSMD;
@@ -1253,7 +1255,7 @@
 
 	%end; *printSMD;
 
-	data table1; set table1; drop vtype; run;
+	data table1; set table1; drop vtype _vraw; run;
 
 	proc datasets lib=work memtype=data nolist nodetails; 
 	CHANGE table1=table1&outsuff; 
