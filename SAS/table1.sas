@@ -171,6 +171,10 @@
 	Jeremy Smith
 	Feb 2018
 	
+	KNOWN ISSUES:
+		-stratvar(s) must have levels that are either variable-name friendly or have a format applied - unlike
+			for numeric rowvars, a format will NOT be generated automatically. 
+
 	======================================================================================== */
 
 %macro isCharacter(chkchar);
@@ -205,6 +209,8 @@
 	);	/* output: WORK.table1 or WORK.table1_<outsuff> */
 
 	options minoperator;
+
+	%let worktabs=;
 
 	proc sql noprint;
 	select memname into :worktabs separated by ' '
@@ -358,6 +364,7 @@
 	%let anymissingvals=0;
 	%let IMvars=;
 	%let hasheaderrow=0;
+	%let poprowdone=0;
 	
 	%do i=1 %to &nvars;
 
@@ -734,6 +741,7 @@
 		run;
 
 		%put VVVLEVS: &vlevs  (V: &V);
+		%let use_headerslice=0;
 
 		* if this is the first row variable, establish column headers for each combination of stratifying levels ;
 		%if &i=1 %then %do;
@@ -770,10 +778,51 @@
 				call symputx("ncols",ncols);
 			end;
 			run;
+			
+			%if &vtype=S %then %do;
+				* in the case that the first requested rowvar is of vtype 'S', need to separately create counts for 'N' row of table ;
+				%let use_headerslice=1;
+
+				data forheader;
+				set pfile_temp;
+				header=1;
+				run;
+
+				proc means data=forheader completetypes chartype NOPRINT;
+				WEIGHT &wtvar;
+				class %do x=1 %to &nstrat; &&S&x %end; / preloadfmt;
+				var header;
+				output out=header_slice sum(header)= / AUTONAME;
+				run;
+
+				* note: the sort order of the header_slice and means_slice datasets is the same (same proc means CLASS statements),
+				so join on row number ;
+				data header_slice;
+				set header_slice;
+				_rn=_N_;
+				run;
+
+				data means_slice;
+				set means_slice;
+				_rn=_N_;
+				run;
+
+				* add counts to the existing output for the vtype 'S' means_slice dataset ;
+				proc sql;
+				create table means_slice (drop=_rn) as
+				select a.*, b.header_sum
+				from
+					means_slice A
+					left join
+					header_slice B
+					on a._rn=b._rn
+				order by a._rn;
+				quit;
+
+				proc datasets lib=work memtype=data nolist nodetails; delete header_slice; run; quit;
+			%end;
 
 		%end;
-
-		%put ::: COLVARS: &colvars;
 
 		data means_slice (keep=var lvl &varorder has_missing test_stat test_stat_val pval);
 		set means_slice END=LAST;
@@ -788,12 +837,17 @@
 		do i=1 to dim(CL,1);
 			CL[i, _N_]=levs[i];  
 		end;
-		F[_N_]=sum(of &vlevs);
+		%if &use_headerslice %then %do;
+			F[_N_]=header_sum;
+		%end;
+		%else %do;
+			F[_N_]=sum(of &vlevs);
+		%end;
 		if last then do;
 			var="&V";
 			has_missing='';
 			do i=1 to %if &vtype=S %then 1; %else dim(CL,1);;
-				if &i=1 and i=1 then do;
+				if &i=1 and i=1 and &poprowdone=0 then do;
 					var='Pop';
 					lvl=' ';
 					do n=1 to dim(F);
@@ -803,6 +857,7 @@
 					output;
 					call missing(of cols2[*]);
 					var="&V";
+					call symputx("poprowdone",1);
 				end;
 				if i=1 and "&vtype"="F" then do;
 					if "&Vf"^="FMISSVAL" then do;
@@ -841,10 +896,6 @@
 			end;
 		end;
 		run;
-
-		title 'means_slice';
-		proc print data=means_slice heading=v width=min; run;
-		title;
 
 		data means_slice;
 		length vtype $1;
@@ -907,9 +958,9 @@
 		%end;
 
 		data means_slice;
-  		length _vraw $32;
+		length _vraw $32;
 		set means_slice;
-  		_vraw=var;
+		_vraw=var;
 		if var^='Pop' and not missing(var) then var="&vrawlabel";
 		run; 
 
@@ -961,7 +1012,7 @@
 			end;
 		end;
 		if not missing(var) then do;
-			vn=var;
+			vn=_vraw;
 			do i=1 to dim(M);
 				M[i]=0;
 			end;
@@ -987,7 +1038,7 @@
 		select name into :klist separated by ' '
 		from dictionary.columns
 		where libname='WORK' and lowcase(memname)='table1'
-		and lowcase(name) NOT in ('vtype', '_vraw', 'var', 'lvl', 'all', 'all_2', 'has_missing', 'pval', 'test_stat', 'test_stat_val');
+		and lowcase(name) NOT in ('vtype', 'var', '_vraw', 'lvl', 'all', 'all_2', 'has_missing', 'pval', 'test_stat', 'test_stat_val');
 
 		select count(*) into :hm trimmed
 		from dictionary.columns
@@ -1019,7 +1070,7 @@
 			invar_name=catx('#',_vraw,rownum);
 		end;
 		lastmiss=lag(has_missing);
-		if _N_>1 and not missing(_vraw) and lastmiss^='Y' and (vtype in ('D', 'F') or (vtype='S' and lowcase(lvl)='mean stddev')) then do;
+		if _N_>1 and not missing(var) and lastmiss^='Y' and (vtype in ('D', 'F') or (vtype='S' and lowcase(lvl)='mean stddev')) then do;
 			start=catx('#',_vraw,rownum);
 			output mergerows;
 		end;
@@ -1094,10 +1145,21 @@
 					%let cvj_name=%scan(&colvars2,&cvj,' ');
 					%let prim_cvj_name=%scan(&colvars,&cvj,' ');
 
-					* only do comparisons where neither or both CVI_NAME and CVJ_NAME contain the string _ALL_ ;
-					* i.e., if the sum below is 1, skip this combination and move to the next ;
+					* limit comparisons to just those likely to be meaningful - otherwise, skip (NOCOMP=1) ;
 					data _null_;
-					call symputx("nocomp",((index("&cvi_name","_ALL_")>0)+(index("&cvj_name","_ALL_")>0))=1);
+					length cvi cvj _cvi _cvj $32;
+					cvi="&prim_cvi_name";
+					cvj="&prim_cvj_name";
+					retain _:;
+					do i=1 to (countc("_",cvi)+1);
+						cviseg=scan(cvi,i,'_');
+						cvjseg=scan(cvj,i,'_');
+						if cviseg^='ALL' then cviseg='X';
+						if cvjseg^='ALL' then cvjseg='X';
+						_cvi=catx('_',_cvi,cviseg);
+						_cvj=catx('_',_cvj,cvjseg);
+					end;
+					call symputx("nocomp",(_cvi^=_cvj));
 					run;
 
 					%if &nocomp %then %goto nextcombo;
@@ -1174,17 +1236,19 @@
 							SMD=sqrt(sum(sum_tc_cv#tc));
 							call symputx("SMD",SMD);
 						end;
-						else call symputx("SMDmsg","::: SMD is not calculable for &vnm: &prim_cvi_name vs. &prim_cvj_name");
+						else call symputx("SMDmsg","SMD is not calculable for &vnm: &prim_cvj_name vs. &prim_cvi_name");
 						quit;
 
-						%put &SMDmsg;
+						%if %length(&SMDmsg) %then %do;
+							%put ::: &SMDmsg;
+						%end;
 
 					%end;
 
 					proc datasets lib=work memtype=data nolist nodetails; delete SMD; run; quit;	
 					
-					%let SMDname=SMD_&prim_cvi_name._vs_&prim_cvj_name;
-					%let SMDshort=SMD_&Zcvi._vs_&Zcvj;
+					%let SMDname=SMD_&prim_cvj_name._vs_&prim_cvi_name;
+					%let SMDshort=SMD_&Zcvj._vs_&Zcvi;
 					%if %length(&SMDname)>32 %then %let toolong=1;;
 
 					data varlev_smd;
