@@ -15,7 +15,7 @@ NOTE: this is a newly developed program - use with caution.
 ================================================================================= */
 
 
-%let PROJ=ORD_Smith_202410066d;  * project database ;
+%let PROJ=ord_smith_202410066d;  * project database ;
 
 libname anh "/data/dart/2024/&PROJ/Data";
 
