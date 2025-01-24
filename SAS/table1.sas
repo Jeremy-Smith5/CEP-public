@@ -129,6 +129,8 @@
 	UPDATE June 2024: expanded standardized mean difference (SMD) utility to allow for all pairwise comparisons in the case that
 		there are more than 2 total levels for stratifying variables - see details below.
 
+	NOTE: this macro has primarily been tested in a Linux environment.
+
 	NOTES on PrintSMD option (see more details in code):
 		1. Quantitative variables must be specified with '/mean std' as the requested statistics. Othwerwise, SMD will not be calculated.
 		2. If the combination of stratifying variables and their respective levels produces >2 columns (aside from the overall total), printSMD
@@ -141,6 +143,17 @@
 	
 	UPDATE Sept 2024: added WTVAR option for optionally specifying a numeric variable containing a person-level weight, e.g., a propensity score
 	
+	UPDATE Oct 2024: added a formatted (f) version of WORK.table1 called WORK.ftable1 - there is one new option associated with this output:
+		- fmt_include_n: includes N along with percent for categorical variables ... if set to 0, only percent is shown (except for top row)
+
+		NOTES: 
+			- if generating an output file from WORK.ftable1, choose xlsx rather than csv, as csv will not preserve leading and trailing
+			whitespace.  Text output, such as rtf or txt will also work. 
+			- in output file, set font to a monospace font such as Courier New to ensure consistent alignment.
+			- if setting fmt_include_n=0, be careful to review the unformatted version for potential suppression issues.
+
+		- fixed an issue that would have left out levels of a categorical variable where a format was provided that did not cover all levels
+		- prevented prefix "_f_" from being added to categorical variable levels if those levels are variable-name friendly
 
 	Sample call:
 		
@@ -159,7 +172,9 @@
 				CHF |
 				PAO2>:fHLN	 <- use '>' flag to ignore missing values in calc. of percentages 
 				,
-			pvalues=1
+			uselabels=1,
+			pvalues=0,
+			printSMD=1
 			);
 
 		data coh.table_2015 (label=&sasprog);
@@ -171,9 +186,7 @@
 	Jeremy Smith
 	Feb 2018
 	
-	KNOWN ISSUES:
-		-stratvar(s) must have levels that are either variable-name friendly or have a format applied - unlike
-			for numeric rowvars, a format will NOT be generated automatically. 
+	
 
 	======================================================================================== */
 
@@ -182,7 +195,7 @@
 		%symdel isCharacter;
 	%end;
 	%global isCharacter;
-	proc sql noprint;
+	proc sql undo_policy=NONE noprint;
 	select count(*) into :vexists from pfile_vars where name=upcase("&chkchar");
 	%if &vexists %then %do;
 		select (type='char') into :isCharacter from pfile_vars where name=upcase("&chkchar");
@@ -190,7 +203,7 @@
 	%end;
 	%else %do;
 		quit;
-		%put :: ERROR: the variable &V does not exist in your input file! -- SAS is quitting! ;
+		%put :: ERROR: the variable &V (#&i) does not exist in your input file! -- SAS is quitting! ;
 		%abort;
 	%end;
 %mend;
@@ -204,6 +217,8 @@
 	usecase=0,	/* if set to 1, use case of variable name as provided in macro call (unless using label) */
 	pvalues=0,	/* 1: will perform an M-H chi-square test for categorical variables, a T-test for 2-way means, KW for 2-way medians */
 	printSMD=0,	/* calculate standardized mean differences for pairwise-comparisons across strata */
+	fmt_include_n=1,/* for the formatted output table (ftable1) -- 0: only include percentages for rows below first ... 1 (dflt): N (%) */
+	outpath=%str(&CWD/), /* output path for .txt file - be sure to include forward or backward slash based on operating system */
 	outsuff=	/* if present, string which will be appended to output dataset name, i.e., WORK.table1&outsuff - an underscore will 
 			be prepended automatically */
 	);	/* output: WORK.table1 or WORK.table1_<outsuff> */
@@ -212,7 +227,7 @@
 
 	%let worktabs=;
 
-	proc sql noprint;
+	proc sql undo_policy=NONE noprint;
 	select memname into :worktabs separated by ' '
 	from dictionary.tables
 	where libname='WORK';
@@ -223,27 +238,59 @@
 			%let outsuff=_&outsuff;
 		%end;
 	%end;
-	
+
+	%let weight_applied=1;	
 	data pfile_temp;
 	set &personfile;
 	%if %length(&wtvar)=0 %then %do;
+		%let weight_applied=0;
 		%let wtvar=wtvar;
-		length wtvar 3;
+		length wtvar 3 freqvar 8;
 		wtvar=1; * i.e., no weighting - everyone has weight of 1 ;
+		freqvar=1;
 	%end;
 	run;
 	
-	proc sql;
+	%if &weight_applied=1 and &pvalues=1 %then %do;
+		* if pvalues are requested and a weight variable is being used and any comparison of medians is occurring, 
+		create a 'FREQ' variable for use by PROC NPAR1WAY that approximates the weight variable ;
+		* the following should probably be removed and instead use a different procedure to compare 
+		medians that allows a WEIGHT statement instead of using PROC NPAR1WAY ;
+		proc sql;
+		create table pfile_temp as
+		select a.*, ceil(a.&wtvar/b.minwtvar) as freqvar length=8
+		from
+			pfile_temp A
+			cross join
+			(select min(&wtvar) as minwtvar from pfile_temp) B;
+		quit;
+
+		* trim the above freqvar to the 99th percentile ;
+		proc means data=pfile_temp noprint;
+		var freqvar;
+		output out=freqdist p99=p99_freqvar;
+		run;
+
+		data pfile_temp;
+		if _N_=1 then set freqdist;
+		set pfile_temp;
+		if freqvar>. then freqvar=min(freqvar,p99_freqvar);
+		run;
+	%end;
+		
+	
+	proc sql noprint undo_policy=NONE;
 	create table pfile_vars (rename=(vnm=name)) as 
 	select upcase(name) as vnm, type, format, length, label
 	from dictionary.columns where libname='WORK' and lowcase(memname)='pfile_temp'
 	order by vnm;
+
+	select max(length(label)) into :maxlabellength trimmed from pfile_vars;
 	quit;
+
+	%let maxlabellength=%sysfunc(max(&maxlabellength,32));
 	
 	%let nstrat=%eval(%sysfunc(countc(&stratvars,|))+1);
-
-	%let multiSMD=0;
-	%if &printSMD^=1 or &nstrat>2 %then %let multiSMD=1;;
 
 	%let svarlist=;
 	%let qsvarlist=;
@@ -263,7 +310,7 @@
 			%let Sf&i=;
 			%isCharacter(&&S&i);
 			* check for format applied to data ;
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select case when type='char' then compress('$' || compress(format,'$.')) else compress(format,'.') end into :Sf&i 
 			from pfile_vars where upcase(name)="&&S&i" and not missing(format);
 			quit;
@@ -276,16 +323,24 @@
 			%end;
 			%if &&Sf&i= %then %do;
 				* make a format ;
-				proc sql;
+				proc sql undo_policy=NONE;
 				create table mkfmt as select distinct "fsfmt" as fmtname, %if &ischaracter %then 'C'; %else 'N'; as type,
-				&&S&i as start, &&S&i as end, compress("&&S&i.._" || %if &ischaracter %then &&S&i; %else put(&&S&i,8.);) as label from pfile_temp order by start;
+				&&S&i as start, &&S&i as end, compress("&&S&i.._" || %if &ischaracter %then &&S&i; %else put(&&S&i,8.);) as label length=32
+				from pfile_temp order by start;
 				quit;
 				%let Sf&i=fsfmt;
 				%if &ischaracter %then %let Sf&i=$fsfmt;
 
+				data mkfmt;
+				set mkfmt;
+				if missing(start) then label="&&S&i.._miss";
+				run;
+
+				%put ::: NOTE: the macro created a format for stratvar &&S&i - you may be able to create shorter column names by making your own format ;
 				proc format cntlin=mkfmt; run;
 			%end;
 		%end;
+
 		%let Sf&i=%sysfunc(compress(&&Sf&i));
 	
 		data pfile_temp (rename=(&&S&i..2=&&S&i));
@@ -301,12 +356,9 @@
 
 	%let ttestOK=0;
 	%if &nstrat=1 %then %do;
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select (count(distinct &S1)=2) into :ttestOK from pfile_temp;
 		quit;
-	%end;
-	%if &ttestOK=0 %then %do;
-		%let multiSMD=1;
 	%end;
 
 	%let nvars=%eval(%sysfunc(countc(&rowvars,|))+1);
@@ -327,7 +379,7 @@
 				%let _lrv=%length(&_rv);
 				%let nwc=0;
 
-				proc sql;
+				proc sql undo_policy=NONE;
 				create table wcvars as
 				select name 
 				from dictionary.columns where libname='WORK'
@@ -365,18 +417,59 @@
 	%let IMvars=;
 	%let hasheaderrow=0;
 	%let poprowdone=0;
+	%let nheaders=0;
+	%let maxlen_header=0;
 	
 	%do i=1 %to &nvars;
 
+		%if &i>&nvars %then %goto varsdone; /* this will occur if the value of nvars is decremented by the 'HEADER' logic below - 
+							- this modification does not change the value of nvars for the %DO I LOOP above, 
+							so the loop will attempt to continue beyond the updated count of variables */
+
 		%let vraw=%upcase(%cmpres(%scan(&rowvars,&i,|)));
-		%if %index(&vraw,BLANKROW) %then %do;
-			%let header=;
-			%let doubleblank=0;
-			%if &hasheaderrow %then %let doubleblank=1;;
-			%let hasheaderrow=1;
-			%if %index(&vraw,:) %then %do;
-				%let header=%scan(&vraw,2,:);
+		
+		%if %index(&vraw,HEADER)=1 %then %do;
+			%let nrows_table1=0;
+			%let nrows_headers=0;
+			%let hasrow2=0;
+			%if &i>1 %then %do;
+				proc sql undo_policy=NONE noprint;
+				select count(*) into :nrows_table1 trimmed from table1;
+				quit;
 			%end;
+			%if &nheaders %then %do;
+				proc sql undo_policy=NONE noprint;
+				select count(*) into :nrows_headers trimmed from all_headers;
+				select sum(rownum=2) into :hasrow2 trimmed from all_headers;
+				quit;
+			%end;
+			%let nheaders=%eval(&nheaders+1);
+
+			data header;
+			length rownum 4 header $50;
+			rownum=max(2,&nrows_table1+1);
+			header=scan("&vraw",2,":");
+			call symputx("maxlen_header",max(&maxlen_header,length(header)));
+			run;
+			
+			proc append data=header base=all_headers; run;
+	
+			data _null_;
+			length allrowvars $10000;
+			allrowvars="&rowvars";
+			array rv {&nvars} $75 _temporary_;
+			retain rn 0;
+			do i=1 to &nvars;
+				if i^=&i then do;
+					rn+1;
+					rv[rn]=scan(allrowvars,i,'|');
+				end;
+			end;
+			call symputx("rowvars",catx('|',of rv[*]));
+			call symputx("nvars",&nvars-1);
+			call symputx("i",&i-1);
+			run;
+
 			%goto nextvar;
 		%end;
 	
@@ -386,7 +479,8 @@
 			%let IMvars=&IMvars %scan(&vraw,1,%str(>));
 		%end;
 		%let isRedo=0;
-		
+		%let userev=0;
+
 		%redo:
 		
 		%let hasMiss=0;
@@ -408,14 +502,78 @@
 			%isCharacter(&V);
 			%if &ischaracter and %substr(&Vf,1,1)^=$ %then %do; %let Vf=$&Vf; %end;
 			proc format cntlout=outfmt; select &Vf; run;
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select (count(*)=0) into :nosuchfmt from outfmt;
 			select distinct label into :dummies separated by " " from outfmt;
+			select distinct (type='N') into :isnumeric trimmed from outfmt;
 			quit;
 			%if &nosuchfmt %then %do;
 				%put :: ERROR: the format &Vf was not found! SAS is quitting.;
 				%abort cancel;
 			%end;
+
+			%if &isnumeric and &isredo=0 %then %do;
+
+				%let userev=1;
+
+				data outfmt;
+				set outfmt;
+				_start=.;
+				_end=.;
+				if start^='LOW' then _start=start*1;
+				if end^='HIGH' then _end=end*1;
+				drop start end;
+				run;
+
+				proc sort data=outfmt; by label _start; run;
+
+				data revfmt;
+				length fmtname $8 type $1 start label $32 default 3;
+				set outfmt (keep=_start _end label type sexcl eexcl hlo
+					rename=(label=_label type=_type hlo=_hlo));
+				by _label _start;
+				retain fmtname 'frevfmt' type 'C' default 32 start label;
+				if first._label then do;
+					if not last._label then do;
+						call symputx("userev",0);
+						stop;
+					end;
+					else do;
+						start=_label;
+						if _hlo='L' then label=compress('<' || _end);
+						else if sexcl='Y' then do;
+							label=compress('>' || _start);
+							if eexcl='Y' then label=compress(label || '-<' || _end);
+							else do;
+								if _hlo='H' then label=compress(label || '+');
+								else label=compress(label || '-' || _end);
+							end;
+						end;
+						else do;
+							if _start<0 or (0<_start<=12 and _start=int(_start)) and _end>_start and eexcl^='Y' then do;
+								* try to avoid potential autoformatting/interpretation issues in Excel ;
+								call symputx("userev",0);
+								stop;
+							end;
+							label=compress(_start);
+							if eexcl='Y' then label=compress(label || '-<' || _end);
+							else do;
+								if _hlo='H' then label=compress(label || '+');
+								else if _end>_start then label=compress(label || '-' || _end);
+							end;
+						end;
+						output;
+					end;
+				end;
+				keep fmtname type start label default;
+				run;
+
+				%if &userev %then %do;
+					proc format cntlin=revfmt; run;
+				%end;
+
+			%end;
+			
 		%end;
 		%else %if %index(&vraw,%str(/)) %then %do;
 			%let vtype=S;
@@ -444,7 +602,7 @@
 			%let Vf=;
 			%put VVVV: &V;
 			* check for a format applied to the input data for variable <V> ;
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select case when type='char' then compress('$' || compress(format,'$.')) else compress(format,'.') end into :Vf 
 			from pfile_vars where upcase(name)="&V" and not missing(format);
 			quit;
@@ -458,7 +616,7 @@
 			%if &Vf^= %then %do;
 				%let Vf=%sysfunc(compress(&Vf));
 				proc format cntlout=outfmt; select &Vf; run;
-				proc sql noprint;
+				proc sql undo_policy=NONE noprint;
 				select (count(*)=0) into :nosuchfmt from outfmt;
 				select distinct label into :dummies separated by " " from outfmt;
 				quit;
@@ -471,7 +629,7 @@
 			%else %do;
 				* check whether binary (and no missing values);
 				%isCharacter(&V);
-				proc sql noprint;
+				proc sql undo_policy=NONE noprint;
 				select (count(*)=0) into :isBin from pfile_temp where &V NOT in 
 				%if &ischaracter %then ('0','1'); %else (0,1); /*and not missing(&V)*/;
 				quit;
@@ -499,15 +657,33 @@
 				%end;
 				%else %do;
 					* make a format ;
-					proc sql noprint;
+					%let allOK=1;
+					%let dumbprefix=_f_;
+					%if &ischaracter %then %do;
+						data _null_;
+						set pfile_temp (keep=&V);
+						WHERE not missing(&V);
+						if length(&V)>32 
+						or 
+						compress(&V,compress(lowcase(&V),'abcdefghijklmnopqrstuvwxyz_0123456789'))^=&V 
+						or
+						anydigit(&V)=1 then do;
+							call symputx("allOK",0);
+							stop;
+						end;
+						run;
+						
+						%if &allOK %then %let dumbprefix=;
+					%end;
+					
+					proc sql undo_policy=NONE noprint;
 					create table mkfmt as select distinct "ffmt" as fmtname, %if &ischaracter %then 'C'; %else 'N'; as type,
-					&V as start, &V as end, compress("_f_" || %if &ischaracter %then &V; %else put(&V,8.);) as label 
+					&V as start, &V as end, compress("&dumbprefix" || %if &ischaracter %then &V; %else put(&V,8.);) as label 
 					from pfile_temp where not missing(&V) order by start;
 					select distinct label into :dummies separated by " " from mkfmt;
 					quit;
 					proc format cntlin=mkfmt; run;
-					%put DUMMIES: &dummies;
-					
+
 					%if &ischaracter %then %let Vf=$ffmt;
 					%else %let Vf=ffmt;
 					%let vtype=F;
@@ -515,7 +691,7 @@
 			%end;
 		%end;
 	
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select label into :vrawlabel from pfile_vars
 		where name="&V";
 		quit;
@@ -526,7 +702,7 @@
 		%let ispropcase=0;
 		%if &_vraw=%sysfunc(propcase(&_vraw)) %then %let ispropcase=1;;
 
-		%if %length(&vrawlabel)>32 or %length(&vrawlabel)=0 or &uselabels=0 or &ispropcase %then %do;
+		%if /*%length(&vrawlabel)>32 or*/ %length(&vrawlabel)=0 or &uselabels=0 or &ispropcase %then %do;
 			%let vrawlabel=&_vraw;
 			%let islabel=0;
 		%end;
@@ -534,10 +710,17 @@
 	
 		%if &vtype=F or &vtype=D %then %do;
 
+			%redo_slice:
+
+			%let nonVNF=0;
+			%let other_dummies=;
+
 			data pfile_slice;
-			set pfile_temp;
-			length _miss &dummies _missV 3;
+			set pfile_temp end=last;
+			length _miss &dummies _missV foundit 3 _nd 4;
+			retain _nd 0;
 			array _d {*} &dummies;
+			array othval {1000} %if &ischaracter %then $32; %else 8; _temporary_;;
 			_miss=0;
 			_missV=0;
 			if missing(&V) and "&Vf"^="FMISSVAL" then _miss=1;
@@ -546,13 +729,45 @@
 					_missV=1;
 					&V=-999;
 				end;
+				foundit=0;
 				do _i=1 to dim(_d);
 					_d[_i]=(upcase(put(&V,&Vf..))=upcase(vname(_d[_i])));
+					if _d[_i] then foundit=1;
+				end;
+				if foundit=0 and %if &ischaracter %then upcase(&V); %else &V; not in othval then do;
+					* a value not contained in the format was found - add it to the dummies list ;
+					_nd+1;
+					%if &ischaracter %then %do;
+						if length(&V)>32 
+						or 
+						compress(&V,compress(lowcase(&V),'abcdefghijklmnopqrstuvwxyz_0123456789'))^=&V 
+						or
+						anydigit(&V)=1 then do;
+							call symputx("nonVNF",1);
+							call symputx("Vval",&V);
+							stop;
+						end;
+					%end;
+					othval[_nd]=upcase(&V);
 				end;
 				if _missV then &V=.;
 			end;
-			drop _i _missV;
+			if last and _nd then do;
+				put "::: NOTE: for variable &V, " _nd " unique values not contained in format &Vf were added to the output";
+				call symputx("other_dummies",catx(' ', of othval[*]));
+			end;
+			drop _i _missV _nd foundit;
 			run;
+
+			%if &nonVNF %then %do;
+				%put "::: ERROR: for variable &V, the value &Vval is not variable-name friendly - to fix, add &Vval to format &Vf";
+				%abort cancel;
+			%end;
+			
+			%if %length(&other_dummies) %then %do;
+				%let dummies=%cmpres(&dummies &other_dummies);
+				%goto redo_slice;
+			%end;
 
 			proc means data=pfile_slice completetypes chartype NOPRINT;
 			WEIGHT &wtvar;
@@ -673,7 +888,8 @@
 				%else %if &doMedian %then %do;
 					ods output KruskalWallisTest=pval;
 						proc npar1way data=pfile_temp;
-						WEIGHT &wtvar;
+						*WEIGHT &wtvar; * not allowed with this procedure - use FREQ instead ;
+						FREQ freqvar;
 						class &S1;
 						var &V;
 						run;
@@ -698,7 +914,7 @@
 			
 			* check for missing values -- if present, add a count of missing values by 
 			stratum at the bottom of the table ;
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select max(&V._nmiss) into :hasMiss from means_slice;
 			quit;
 			%if &hasMiss %then %do;
@@ -721,7 +937,7 @@
 		%end;
 
 		** get variables that identify the levels of rowvar V<i> ;
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		create table mslicevars as select name, varnum from dictionary.columns
 		where libname='WORK' and lowcase(memname)='means_slice' and upcase(name) NOT in (&qsvarlist "_TYPE_" "_FREQ_")
 		order by varnum;
@@ -748,8 +964,9 @@
 			data means_slice;
 			length &svarlist $32;
 			set means_slice END=LAST;
-			length colvarstring colvarstring2 $1200 varorder $2400 squash squash2 $40 ncols 8;
-			retain colvarstring '' colvarstring2 '' varorder '' ncols 0;
+			length colvarstring colvarstring2 $1200 cnumstring varorder $2400 squash squash2 $40 ncols 8;
+			retain colvarstring '' colvarstring2 '' cnumstring '' varorder '' ncols 0;
+			ncols+1;
 			array svars {*} &svarlist;
 			do i=1 to dim(svars);
 				svars[i]=coalesceC(svars[i],'ALL');
@@ -763,22 +980,24 @@
 
 			squash2=compress(squash || '_2');
 			if length(squash2)>32 then do;
-				put "ERROR: at least one combination of your stratifying variables produces a variable that is >32 char long!";
-				put "..." squash2;
+				put "::: ERROR: this stratifying variable is >32 char long: " squash2;
 				abort cancel;
 			end;
 			colvarstring=catx(' ', colvarstring, squash);
 			colvarstring2=catx(' ', colvarstring2, squash2);
+			cnumstring=catx(' ', cnumstring, compress("V" || ncols || "=" || squash));
 			varorder=catx(' ', varorder, squash, squash2);
-			ncols+1;
+			
 			if last then do;
 				call symput("colvars",colvarstring);
 				call symput("colvars2",colvarstring2);
+				call symput("cnumstring",cnumstring);
 				call symput("varorder",varorder);
 				call symputx("ncols",ncols);
 			end;
+			drop colvarstring: cnumstring varorder squash: ncols;	
 			run;
-			
+		
 			%if &vtype=S %then %do;
 				* in the case that the first requested rowvar is of vtype 'S', need to separately create counts for 'N' row of table ;
 				%let use_headerslice=1;
@@ -808,7 +1027,7 @@
 				run;
 
 				* add counts to the existing output for the vtype 'S' means_slice dataset ;
-				proc sql;
+				proc sql undo_policy=NONE;
 				create table means_slice (drop=_rn) as
 				select a.*, b.header_sum
 				from
@@ -936,32 +1155,15 @@
 			%let pval=;
 		%end;
 
-		%if &hasheaderrow %then %do;
-
-			%do _b=1 %to %eval(&doubleblank+1);
-				data _blank;
-				set means_slice (obs=1);
-				array c {*} _character_;
-				array n {*} _numeric_;
-				call missing(of c[*], of n[*]);
-				if &_b=&doubleblank+1 then var="&header";
-				run;
-
-				proc append data=_blank base=table1; run;
-			%end;
-
-			proc datasets lib=work memtype=data nolist nodetails; delete _blank; run; quit;
-
-			%let hasheaderrow=0;
-			%let header=;
-
-		%end;
-
 		data means_slice;
-		length _vraw $32;
+		length _vraw $32 var $&maxlabellength;
 		set means_slice;
 		_vraw=var;
 		if var^='Pop' and not missing(var) then var="&vrawlabel";
+		%if &userev %then %do;
+			%put ::: applied $frevfmt for variable &V;
+			if not missing(lvl) then lvl=put(lvl,$frevfmt.);
+		%end;
 		run; 
 
 		proc append data=means_slice base=table1; run;
@@ -974,6 +1176,8 @@
 		%nextvar:
 
 	%end; *nvars loop;
+
+	%varsdone:
 
 	%if &pvalues=0 %then %do;
 		data table1;
@@ -1023,7 +1227,7 @@
 			end;
 			if compress(vn) in V then lvl='(none)';
 		end;
-		if compress(vn) in V and lvl not in ('(missing)','(none)') and not missing(lvl) then do;
+		if compress(vn) in V and lvl not in ('(missing)','(none)') and not missing(lvl) and vtype^='S' then do;
 			do i=1 to dim(N);
 				if cols2[i]>. then cols2[i]=cols[i]/(N[i]-M[i]);  * i.e., denom for percentages in COL2 is now limited to non-missing values for <VAR> ;
 			end;
@@ -1032,9 +1236,11 @@
 		run;
 	%end;
 	
+	%let oneSMD=0;
+
 	%if &printSMD=1 %then %do;
 		
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select name into :klist separated by ' '
 		from dictionary.columns
 		where libname='WORK' and lowcase(memname)='table1'
@@ -1080,7 +1286,7 @@
 
 		proc format cntlin=mergerows; run;
 
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select distinct invar_name into :vlist separated by ' ' from forSMD;
 
 		select count(distinct invar_name) into :nv trimmed from forSMD;
@@ -1115,7 +1321,7 @@
 
 			%let vnm=%scan(&vlist,&vnum,' ');
 			* get # of levels for <VNM> minus 1 (i.e., excluding the ref level, for which we are using the last level) ;
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select max(nlevs)-1 into :nlevs trimmed from forSMD WHERE invar_name="&vnm";
 
 			select case when isMean then 'M' when is2lev then '2' when isMulti then '3' else 'x' end 
@@ -1249,7 +1455,10 @@
 					
 					%let SMDname=SMD_&prim_cvj_name._vs_&prim_cvi_name;
 					%let SMDshort=SMD_&Zcvj._vs_&Zcvi;
-					%if %length(&SMDname)>32 %then %let toolong=1;;
+					%if %length(&SMDname)>32 %then %do;
+						%let toolong=1;
+						%put ::: The SMD var name &SMDname is >32 in length - &SMDshort will be used instead;
+					%end;
 
 					data varlev_smd;
 					set varlev_smd;
@@ -1283,13 +1492,24 @@
 				tRN[i]=catx('=',vname(V[i]),vlabel(V[i]));
 			end;
 			call symputx("SMD_rename",catx(' ',of tRN[*]));
+			call symputx("oneSMD",(dim(V)=1));
 			run;
-	
+
 			data all_varlev_smd;
 			set all_varlev_smd;
+			array V {*} SMD_:;
 			rename &SMD_rename;
 			run;
 
+			%if &oneSMD %then %do;
+				proc sql undo_policy=NONE noprint;
+				select name into :oneSMDname trimmed
+				from dictionary.columns where libname='WORK'
+				and lowcase(memname)='all_varlev_smd'
+				and lowcase(name) like 'smd_%';
+				quit;
+			%end;
+		
 		%end;
 
 		proc sort data=table1; by rownum; run;
@@ -1319,11 +1539,270 @@
 
 	%end; *printSMD;
 
-	data table1; set table1; drop vtype _vraw; run;
+	%let crnd=0;
+	%if &weight_applied %then %do;
+		%let crnd=1;
+	%end;
+
+	* for the formatted ('f') version of the output table, establish column widths and rounding precision ;
+	data table1;
+	set table1 end=last;
+	retain mxclen 0 mxvlen 0;
+	array c {*} &colvars;
+	array c2 {*} &colvars2;
+	has2=0;
+	if countW(lvl,' ')=2 then do;
+		lvl=compbl(scan(lvl,1,' ') || ' (' || scan(lvl,2,' ') || ')');
+		has2=1;
+	end;
+	var=tranwrd(strip(var),' ','^');
+	lvl=tranwrd(strip(lvl),' ','^');
+	clen=length(compress(var || lvl))+1;
+	mxclen=max(mxclen,clen);
+	var=tranwrd(var,'^',' ');
+	lvl=tranwrd(lvl,'^',' ');
+	
+	if vtype='S' and _N_^=1 then do;
+		maxD=.;
+		maxD2=.;
+		do i=1 to dim(c);
+			do d=0 to 4;
+				if abs(c[i])>=10**-d then leave; 
+			end;
+			maxD=max(maxD,d);
+			if has2 then do;
+				do d=0 to 4;
+					if abs(c2[i])>=10**-d then leave; 
+				end;
+				maxD2=max(maxD2,d);
+			end;
+		end;
+	end;
+	do i=1 to dim(c);
+		if _N_=1 then vlen=length(compress(put(c[i],comma15.&crnd) || put(c2[i]*100,4.1)))+3;
+		else if vtype='S' then do;
+			if has2 then vlen=length(compress(put(round(c[i],10**-maxD),best.) || put(round(c2[i],10**-maxD2),best.)))+3;
+			else vlen=length(compress(put(round(c[i],10**-maxD),best.)));
+		end;
+		mxvlen=max(mxvlen,vlen);
+	end;
+	if last then do;
+		call symputx("mxclen",mxclen+3);
+		call symputx("mxvlen",mxvlen+1);
+	end;
+	drop mxclen mxvlen vlen i d;
+	run;
+	
+	data ftable1 (rename=(&cnumstring /*%if &oneSMD %then %do; &oneSMDname=SMD %end;*/));
+	length Characteristic $&mxclen v1-v&ncols $&mxvlen;
+	set table1;
+	array c {*} &colvars;
+	array c2 {*} &colvars2;
+	array v {*} v1-v&ncols;
+	var=tranwrd(strip(var),' ','^');
+	lvl=tranwrd(strip(lvl),' ','^');
+	isrange=(lowcase(lvl) in ('min^(max)', 'q1^(q3)', 'p25^(p75)', 'p10^(p90)', 'p5^(p95)', 'p1^(p99)'));
+	sp=repeat('^',&mxclen-length(compress(var))-length(compress(lvl))-1);
+	Characteristic=compress(var || sp || lvl);
+	Characteristic=tranwrd(characteristic,'^',' ');
+	do i=1 to dim(v);
+		if _N_=1 then do;
+			v[i]=	compress(
+				repeat('^',int((&mxvlen-length(compress(put(c[i],comma15.&crnd)))-length(compress(put(c2[i]*100,4.1)))-3)/2)) ||
+				put(c[i],comma15.&crnd) || '^(' ||
+				put(c2[i]*100,4.1) || ')' ||
+				repeat('^',int((&mxvlen-length(compress(put(c[i],comma15.&crnd)))-length(compress(put(c2[i]*100,4.1)))-3)/2))
+				);
+		end;
+		else if vtype='S' then do;
+			if has2 then do;
+				if isrange then
+					v[i]=	compress(
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2)) ||
+						put(round(c[i],10**-maxD),best.) ||
+						'-' || put(round(c2[i],10**-maxD2),best.) ||
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2))
+						);
+				else
+					v[i]=	compress(
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2)) ||
+						put(round(c[i],10**-maxD),best.) ||
+						'^(' || put(round(c2[i],10**-maxD2),best.) || ')' ||
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2))
+						);
+			end;
+			else v[i]=	compress(
+					repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-1)/2)) ||
+					put(round(c[i],10**-maxD),best.) || 
+					repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-1)/2))
+					);
+		end;
+		else if c2[i]^=. then do;
+			%if &fmt_include_n %then %do;
+				v[i]=	compress(
+					repeat('^',int((&mxvlen-length(compress(put(c[i],comma15.&crnd)))-length(compress(put(c2[i]*100,4.1)))-3)/2)) ||
+					put(c[i],comma15.&crnd) || '^(' ||
+					put(c2[i]*100,4.1) || ')' ||
+					repeat('^',int((&mxvlen-length(compress(put(c[i],comma15.&crnd)))-length(compress(put(c2[i]*100,4.1)))-3)/2))
+					);
+			%end;
+			%else %do;	
+				v[i]=	compress(
+					repeat('^',int((&mxvlen-length(compress(put(c2[i]*100,4.1)))-1)/2)) ||
+					put(c2[i]*100,4.1) || 
+					repeat('^',int((&mxvlen-length(compress(put(c2[i]*100,4.1)))-1)/2))
+					);
+			%end;
+		end;
+		v[i]=tranwrd(v[i],'^',' ');
+	end;
+	if isrange then do;
+		characteristic=tranwrd(characteristic,' (','-');
+		characteristic=tranwrd(characteristic,')','');
+	end;
+	characteristic=tranwrd(characteristic,'_',' ');
+	%if &oneSMD %then %do;
+		SMD=put(&oneSMDname,8.5);
+		if compress(SMD)='.' then SMD='';
+		drop &oneSMDname;
+	%end;
+	drop vtype _vraw var lvl isrange &colvars &colvars2 %if &anymissingvals %then has_missing; clen has2 maxD maxD2 sp i;
+	run;
+
+	* add headers, if any, to the formatted and unformatted tables ;
+	%if &nheaders %then %do;
+
+		%let nv_f=0;
+		proc sql undo_policy=NONE noprint;
+		select count(*) into :nnv_f trimmed from dictionary.columns where libname='WORK' and lowcase(memname)='ftable1' and type='num';
+		select count(*) into :ncv_f trimmed from dictionary.columns where libname='WORK' and lowcase(memname)='ftable1' and type='char';
+		select count(*) into :nnv_u trimmed from dictionary.columns where libname='WORK' and lowcase(memname)='table1' and type='num';
+		select count(*) into :ncv_u trimmed from dictionary.columns where libname='WORK' and lowcase(memname)='table1' and type='char';
+
+		select name into :nv_f separated by ' ' from dictionary.columns where libname='WORK' and lowcase(memname)='ftable1' and type='num';
+		select name into :cv_f separated by ' ' from dictionary.columns where libname='WORK' and lowcase(memname)='ftable1' and type='char';
+		select name into :nv_u separated by ' ' from dictionary.columns where libname='WORK' and lowcase(memname)='table1' and type='num';
+		select name into :cv_u separated by ' ' from dictionary.columns where libname='WORK' and lowcase(memname)='table1' and type='char';
+		quit;
+
+		data ftable1;
+		length Category $&maxlen_header;
+		set 
+			all_headers (in=A)
+			ftable1
+			;
+		retain tr 0 hr 0;
+		if A then do;
+			array hrow {&nheaders} _temporary_;
+			array head {&nheaders} $&maxlen_header _temporary_;
+			hrow[_N_]=rownum;
+			head[_N_]=header;
+		end;
+		else do;
+			%if &nnv_f %then %do;
+				array nv {*} &nv_f;
+				array nvT {&nnv_f} _temporary_;
+			%end;
+			array cv {*} &cv_f;
+			array cvT {&ncv_f} $150 _temporary_;
+			tr+1;
+			if tr in hrow then do;
+				hr+1;
+				%if &nnv_f %then %do;
+					do i=1 to dim(nv);
+						nvT[i]=nv[i];
+					end;
+				%end;
+				do i=1 to dim(cv);
+					cvT[i]=cv[i];
+				end;
+				call missing(%if &nnv_f %then of nv[*],; of cv[*]);
+				Category=head[hr];
+				output;
+				Category='';
+				%if &nnv_f %then %do;
+					do i=1 to dim(nv);
+						nv[i]=nvT[i];
+					end;
+				%end;
+				do i=1 to dim(cv);
+					cv[i]=cvT[i];
+				end;
+				call missing(%if &nnv_f %then of nvT[*],; of cvT[*]);
+			end;
+			output;
+		end;
+		drop rownum header tr hr i;
+		run;
+
+		data table1;
+		length Category $&maxlen_header;
+		set 
+			all_headers (in=A)
+			table1
+			;
+		retain tr 0 hr 0;
+		if A then do;
+			array hrow {&nheaders} _temporary_;
+			array head {&nheaders} $&maxlen_header _temporary_;
+			hrow[_N_]=rownum;
+			head[_N_]=header;
+		end;
+		else do;
+			array nv {*} &nv_u;
+			array nvT {&nnv_u} _temporary_;
+			array cv {*} &cv_u;
+			array cvT {&ncv_u} $150 _temporary_;
+			tr+1;
+			if tr in hrow then do;
+				hr+1;
+				do i=1 to dim(nv);
+					nvT[i]=nv[i];
+				end;
+				do i=1 to dim(cv);
+					cvT[i]=cv[i];
+				end;
+				call missing(of nv[*], of cv[*]);
+				Category=head[hr];
+				output;
+				Category='';
+				do i=1 to dim(nv);
+					nv[i]=nvT[i];
+				end;
+				do i=1 to dim(cv);
+					cv[i]=cvT[i];
+				end;
+				call missing(of nvT[*], of cvT[*]);
+			end;
+			output;
+		end;
+		drop rownum header tr hr i;
+		run;
+
+	%end;
+
+	options nonotes nosource;
+
+	proc printto new file="&OUTPATH.table1&outsuff..txt"; run;
+
+		proc print data=ftable1 noobs width=min; run;
+
+	proc printto; run;
+
+	options notes source;
+
+	title "formatted output -- ftable1&outsuff";
+	proc print data=ftable1 width=min noobs; run;
+	title;
+
+	data table1; set table1; drop vtype _vraw clen has2 maxD:; run;
 
 	proc datasets lib=work memtype=data nolist nodetails; 
-	CHANGE table1=table1&outsuff; 
-	SAVE &worktabs table1&outsuff; 
+	CHANGE table1=table1&outsuff ftable1=ftable1&outsuff; 
+	SAVE &worktabs table1&outsuff ftable1&outsuff; 
 	run; quit;
+
+	%put ::: OUTPUTS -- unformatted: table1&outsuff ... formatted: WORK.ftable1&outsuff ;
+	%put ::: Created text file: &OUTPATH.table1&outsuff..txt ;
 
 %MEND; *table1();
