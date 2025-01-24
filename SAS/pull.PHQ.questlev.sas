@@ -12,6 +12,18 @@ WRJ Vermont VAMC
 
 NOTE: this is a newly developed program - use with caution.
 
+UPDATE: removed the field LegacyChoice / char_score - this seems to be from
+an outdated scoring system.  Just leaving the text answer here instead.  
+Refer to, e.g., 
+https://med.stanford.edu/fastlab/research/imapp/msrs/_jcr_content/main/accordion/accordion_content3/download_256324296/file.res/PHQ9%20id%20date%2008.03.pdf
+to translate choice text to a numerical score:
+
+For questions 1-9:
+  "Not at all"             =0
+  "Several days"           =1
+  "More than half the days"=2
+  "Nearly every day"       =3
+
 ================================================================================= */
 
 
@@ -70,8 +82,9 @@ select
 	input(designator,3.) as designator length=3,
 	questionSequence length=5, 
 	surveyQuestionText as question length=75,
-	surveyChoiceText as choice length=75, 
-	LegacyValue as char_score length=10
+	surveyChoiceText as choice length=75
+ 	/*, 
+	LegacyValue as char_score length=10  -- removed -- see note in header */
 	from connection to SDAT (
 		select 
 		a.*, 
