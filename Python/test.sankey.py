@@ -1,17 +1,23 @@
 
 ## the following demonstrates use of tools contained in 'countproc_and_sankey_tools.py'
 ## Jeremy Smith ~ 2020
+## The following creates simulated line-of-therapy data based on the parameters 
+## specified in the call to mkcpin() below (line starting with "drugevents, fakebounds = ...")
+## To use with real data, provide drug event and patient boundaries (start and end of follow-up) data 
+## as a CSV in the format required for the mkcp() function -- see output of the simulated data
+## printed at lines 29 and 33 below: chop(drugevents...) and chop(fakebounds...) for required format
+## **** NOTE this is very much a work in progress ****
 
 import sys
+## change the path below to the path where 'countproc_and_sankey_tools.py' (also in this Github) exists.
 sys.path.append("/home/vhawrjsmithj")
 
-#import sankeytools
-from sankeytools import *
+from countproc_and_sankey_tools import *
 
 printrows = 20
 
 drugevents, fakebounds = mkcpin(
-    nppl = 5, 
+    nppl = 1000, 
     outcomes = ['EOD', 'event', 'died'], 
     cohorts = ['grp1', 'grp2'], 
     events = ['drugA', 'drugB', 'drugC', 'drugD', 'drugE'],
