@@ -143,7 +143,7 @@
 
 	%let interv=1;
 	%let datelen=5;
-	%let datefmt=yymmddn8.;
+	%let datefmt=date9.;
 	%if &datetime %then %do;
 		%let interv=%sysevalf(24*60*60);
 		%let datelen=7;
