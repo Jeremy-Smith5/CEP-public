@@ -15,14 +15,15 @@
 	June 2024
 
 	NOTE: flag prefix can be specified - however, the variable
-	name must match this format: <flagprefix>#_[suffix], e.g., 
-	flag03_isVeteran, flag3_isVeteran, etc. - an underscore 
-	must come immediately after the number except in the case
+	name must match this format: <flagprefix>#[letter]_[suffix], e.g., 
+	flag03_isVeteran, flag3_isVeteran, flag03b_isVeteran etc. - an underscore 
+	must come immediately after the number or number/letter except in the case
 	of an exclusion variable, which must be in the format:
 	<flagprefix>#x_[suffix], e.g. flag02x_under18.
 
 	<flagnums>, if specified, does not need to be in numerical order - 
-	attrition will be carried out in the order provided.
+
+	** attrition will be carried out in the order provided **
 
 	If <flagnums> is not specified, all flags will be used.
 
@@ -46,12 +47,18 @@
 		and $fpar is specified as above, flag 12 will depend 
 		on 8b while 8b will depend on 7.
 
+	UPDATES:
+		- 25 Mar 2025 
+			- added checks to crash program if duplicate
+			or non-existent flags are provided in <flagnums>
+		
+
 	============================================================ */
 
 
 %MACRO subpop(
 	indata=,		/* can be permanent - must contain (at least) patientICN, <flagprefix>: */
-	flagnums=,		/* a list of numbers, e.g., 1 2 3 5 8 10 that correspond to flags of interest - leading zeros are not required */
+	flagnums=,		/* a list of numbers, e.g., 1 2 3 5 8 10 that correspond to flags of interest - leading zeros are NOT required */
 	offset_flow=0,		/* allows branching (i.e., flag is dependent on a flag earlier than the prior) - if set to 1, 
 					subset will be forced to 0 (no subsetting done) and user must supply a format called $fpar 
 					that crosswalks offset flags to their immediate parent */
@@ -111,13 +118,23 @@
 		run;
 	%end;
 
-	%let flagnums=%cmpres(&flagnums);
+	%let flagnums=%lowcase(%cmpres(&flagnums));
 	%let flagnums_csv="%scan(&flagnums,1,' ')";
 	%let nfl=%sysfunc(countW(&flagnums,' '));
+	%let dupflag=0;
 	%if &nfl>1 %then %do;
 		%do i=2 %to &nfl;
-			%let flagnums_csv=&flagnums_csv, "%scan(&flagnums,&i,' ')";
+			%let nextflag=%scan(&flagnums,&i,' ');
+			data _null_;
+			if "&nextflag" in (&flagnums_csv) then call symputx("dupflag",1);
+			run;
+			%let flagnums_csv=&flagnums_csv, "&nextflag";
 		%end;
+	%end;
+
+	%if &dupflag %then %do;
+		%put ::: ERROR: at least one flag in (&flagnums) is repeated - SAS is quitting ;
+		%abort cancel;
 	%end;
 
 	%let spoutdata=subpop;
@@ -142,7 +159,8 @@
 	array Tjoin {&nfl} $32 _temporary_;
 	array isX {&nfl} _temporary_;
 	array Tf {&nfl} $5 _temporary_ (&flagnums_csv);
-	retain ov 0;
+	array valid {&nfl} 3 _temporary_ (&nfl*0);
+	retain ov 0 dupflag 0;
 	upos=index(name,'_');
 	* allow the possibility of exclusion flags (with 'x' between # and '_'), e.g., flag02x_under18 ;
 	fx=0;
@@ -150,7 +168,7 @@
 		upos=upos-1;
 		fx=1;
 	end;
-	fn=substr(name,&prelen+1,upos-(&prelen+1));
+	fn=lowcase(substr(name,&prelen+1,upos-(&prelen+1)));
 	if anydigit(fn)^=1 then do;
 		call symputx("exit",1);
 		call symputx("exitvar",name);
@@ -171,6 +189,8 @@
 			T[i]=name;
 			Tjoin[i]=compress("&flagprefix" || fn);
 			isX[i]=fx;
+			if valid[i] then dupflag=1;
+			valid[i]=1;
 			leave;
 		end;
 	end;
@@ -188,6 +208,8 @@
 		end;
 		call symputx("isX",catx(',', of isX[*]));
 		call symputx("nff",dim(isX)-nmiss(of isX[*]));
+		call symputx("dupflag",dupflag); * indicates that a flag in <flagnums> was repeated ;
+		call symputx("all_valid",min(of valid[*])); * all_valid=0 indicates at least 1 flag in <flagnums> does not exist in the data ;
 		if ov then call symputx("sprnlist",catx(' ',of oth[*]));
 		length sortorder 3 joinstring step $32;
 		do sortorder=1 to dim(Tjoin);
@@ -197,6 +219,11 @@
 		end;
 	end;  
 	run;
+
+	%if &all_valid=0 %then %do;
+		%put ::: ERROR: at least one of these flags (&flagnums) does not exist in the data - SAS is quitting ;
+		%abort cancel;
+	%end;
 
 	data base;
 	length fmtname $8 type $1 start $8 label 3;

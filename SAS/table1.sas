@@ -218,7 +218,7 @@
 	pvalues=0,	/* 1: will perform an M-H chi-square test for categorical variables, a T-test for 2-way means, KW for 2-way medians */
 	printSMD=0,	/* calculate standardized mean differences for pairwise-comparisons across strata */
 	fmt_include_n=1,/* for the formatted output table (ftable1) -- 0: only include percentages for rows below first ... 1 (dflt): N (%) */
-	outpath=%str(&CWD/), /* output path for .txt file - be sure to include forward or backward slash based on operating system */
+	outpath=%str(&CWD), /* output path for .txt file */
 	outsuff=	/* if present, string which will be appended to output dataset name, i.e., WORK.table1&outsuff - an underscore will 
 			be prepended automatically */
 	);	/* output: WORK.table1 or WORK.table1_<outsuff> */
@@ -278,6 +278,22 @@
 		run;
 	%end;
 		
+	%let any_strat=1;	
+	%if %length(&stratvars)=0 %then %do;
+		%let printSMD=0;
+		%let pvalues=0;
+		%let any_strat=0;
+		%let stratvars=RSTRAT;
+
+		data pfile_temp;
+		length RSTRAT $6;
+		set pfile_temp;
+		RSTRAT='RSLOW';
+		if ranuni(0)>0.5 then RSTRAT='RSHIGH';
+		run;
+	%end;
+	
+	%let nstrat=%eval(%sysfunc(countc(&stratvars,|))+1);
 	
 	proc sql noprint undo_policy=NONE;
 	create table pfile_vars (rename=(vnm=name)) as 
@@ -289,8 +305,6 @@
 	quit;
 
 	%let maxlabellength=%sysfunc(max(&maxlabellength,32));
-	
-	%let nstrat=%eval(%sysfunc(countc(&stratvars,|))+1);
 
 	%let svarlist=;
 	%let qsvarlist=;
@@ -335,8 +349,10 @@
 				set mkfmt;
 				if missing(start) then label="&&S&i.._miss";
 				run;
-
-				%put ::: NOTE: the macro created a format for stratvar &&S&i - you may be able to create shorter column names by making your own format ;
+				
+				%if &any_strat %then %do;
+					%put ::: NOTE: the macro created a format for stratvar &&S&i - you may be able to create shorter column names by making your own format ;
+				%end;
 				proc format cntlin=mkfmt; run;
 			%end;
 		%end;
@@ -472,6 +488,24 @@
 
 			%goto nextvar;
 		%end;
+
+		data _null_;
+		v="&vraw";
+		v=scan(v,1,':');
+		v=scan(v,1,'/');
+		if char(v,1)='>' then v=substr(v,2);
+		v=scan(v,1,'>');
+		call symputx("Vclean",v);
+		run;
+
+		proc sql noprint;
+		select (count(*)=0) into :allmiss from pfile_temp where not missing(&Vclean);
+		quit;
+
+		%if &allmiss %then %do;
+			%put ::: WARNING -- variable &Vclean is entirely missing! Skipping... ;
+			%goto nextvar;
+		%end;
 	
 		%let ignoreMiss=0;
 		%if %index(&vraw,%str(>)) %then %do;
@@ -512,7 +546,7 @@
 				%abort cancel;
 			%end;
 
-			%if &isnumeric and &isredo=0 %then %do;
+			%if &isnumeric and &isredo=0 and %substr(&Vf,1,1)^=X /*<<- fmtname starting with X */ %then %do;
 
 				%let userev=1;
 
@@ -550,7 +584,7 @@
 							end;
 						end;
 						else do;
-							if _start<0 or (0<_start<=12 and _start=int(_start)) and _end>_start and eexcl^='Y' then do;
+							if _start<0 /*or (0<_start<=12 and _start=int(_start))*/ and _end>_start and eexcl^='Y' then do;
 								* try to avoid potential autoformatting/interpretation issues in Excel ;
 								call symputx("userev",0);
 								stop;
@@ -1602,7 +1636,7 @@
 	var=tranwrd(strip(var),' ','^');
 	lvl=tranwrd(strip(lvl),' ','^');
 	isrange=(lowcase(lvl) in ('min^(max)', 'q1^(q3)', 'p25^(p75)', 'p10^(p90)', 'p5^(p95)', 'p1^(p99)'));
-	sp=repeat('^',&mxclen-length(compress(var))-length(compress(lvl))-1);
+	sp=repeat('^',&mxclen-length(compress(var))-length(compress(lvl))-1+isrange-(isrange=0));
 	Characteristic=compress(var || sp || lvl);
 	Characteristic=tranwrd(characteristic,'^',' ');
 	do i=1 to dim(v);
@@ -1618,17 +1652,21 @@
 			if has2 then do;
 				if isrange then
 					v[i]=	compress(
-						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2)) ||
-						put(round(c[i],10**-maxD),best.) ||
-						'-' || put(round(c2[i],10**-maxD2),best.) ||
-						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2))
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-
+							length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2)-1) ||
+							put(round(c[i],10**-maxD),best.) ||
+							'-' || put(round(c2[i],10**-maxD2),best.) ||
+							repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-
+							length(compress(put(round(c2[i],10**-maxD2),best.)))-0)/2)+1)
 						);
 				else
 					v[i]=	compress(
-						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2)) ||
-						put(round(c[i],10**-maxD),best.) ||
-						'^(' || put(round(c2[i],10**-maxD2),best.) || ')' ||
-						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2))
+						repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-
+							length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2)) ||
+							put(round(c[i],10**-maxD),best.) ||
+							'^(' || put(round(c2[i],10**-maxD2),best.) || ')' ||
+							repeat('^',int((&mxvlen-length(compress(put(round(c[i],10**-maxD),best.)))-
+							length(compress(put(round(c2[i],10**-maxD2),best.)))-3)/2))
 						);
 			end;
 			else v[i]=	compress(
@@ -1660,7 +1698,8 @@
 		characteristic=tranwrd(characteristic,' (','-');
 		characteristic=tranwrd(characteristic,')','');
 	end;
-	characteristic=tranwrd(characteristic,'_',' ');
+	if prxmatch('/^\s*_f_[0-9]+\s*$/', characteristic) then characteristic=tranwrd(characteristic,'_f_','   ');
+	else characteristic=tranwrd(characteristic,'_',' ');
 	%if &oneSMD %then %do;
 		SMD=put(&oneSMDname,8.5);
 		if compress(SMD)='.' then SMD='';
@@ -1783,9 +1822,23 @@
 
 	options nonotes nosource;
 
-	proc printto new file="&OUTPATH.table1&outsuff..txt"; run;
+	%if &any_strat=0 %then %do;
+		data ftable1;
+		set ftable1;
+		drop rstrat:;
+		run;
+	
+		data table1;
+		set table1;
+		drop rstrat:;
+		run;
+		
+		%put ::: You did not specify any stratifying variables for STRATVARS - only overall columns were created. ;
+	%end;
 
-		proc print data=ftable1 noobs width=min; run;
+	proc printto new file="&OUTPATH/table1&outsuff..txt"; run;
+
+		proc print data=ftable1 /*%if &anymissingvals %then %do; (drop=has_missing) %end;*/ noobs width=min; run;
 
 	proc printto; run;
 
@@ -1803,6 +1856,6 @@
 	run; quit;
 
 	%put ::: OUTPUTS -- unformatted: table1&outsuff ... formatted: WORK.ftable1&outsuff ;
-	%put ::: Created text file: &OUTPATH.table1&outsuff..txt ;
+	%put ::: Created text file: &OUTPATH/table1&outsuff..txt ;
 
 %MEND; *table1();

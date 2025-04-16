@@ -5,8 +5,6 @@ Pull OP dispensations and IP administrations of drugs from CDW based
 on generic name and/or VA drug class.
 
 vhawrjsmithj
-21 Oct 2021
-
 NOTE: sample call for these two macros is at bottom
 
 UPDATE Mar 2023 - all 'helper' macros which were previously defined in other
@@ -14,6 +12,9 @@ SAS programs have now been added to this program to make it stand-alone. These
 include %mklookup, %smush, %smush_search and %mkdrugfile.  The two macros
 (also here) that need to be run independently by the user are getSIDs() and 
 pull_drugs() as shown in the example call at the bottom.
+
+UPDATE 30 Jan 2025: updated macro to allow use of Src3 (combined Vista + Millenium)
+data.  To do this, set the new macro parameter, useSrc3, to 1.
 
 ================================================================================ */
 
@@ -23,16 +24,17 @@ pull_drugs() as shown in the example call at the bottom.
 	test_search=0,
 	hasClassFile=1,
 	hasNamesFile=1,
+	exactNDC=0,	/* 1: join search_term to data based on exact NDC match, not LIKE (only relevant if hasNamesFile=1) */
+	allow_partial_NDC=0,
 	csvext=,	/* only applicable if test_search=1 */
 	limit_smush_snippet=,
-	useNatDrug=0
+	useNatDrug=0,
+	useSrc3=0		/* 0: use Src (Vista only) ... 1: use Src3 (Vista + Millenium) */
 	);
 
-	/*
-	** see note at top - these included macros are now contained in the current program ;
-	%include "&COMMON/mk.druglookup.sas";
-
-	%include "&COMMON/look.drugs.sas"; */
+	%global chkSrc3;
+	%let chkSrc3=0;
+	%if &useSrc3 %then %let chkSrc3=1;;
 
 	%mklookup(valid_ndcs_only=0, inclNatDrug=&useNatDrug);
 
@@ -108,37 +110,44 @@ pull_drugs() as shown in the example call at the bottom.
 * NOTE: the mkloopup macro defined below is called by the getSIDs macro above - it does not need to be run separately ;
 %MACRO mklookup(valid_ndcs_only=1, inclNatDrug=1);
 
-	proc sql;
+	%let CWnum=;
+	%let vwsuff=;
+	%if &chksrc3 %then %do;
+		%let vwsuff=_EHR;
+		%let CWnum=3;
+	%end;
+
+	proc sql undo_policy=NONE;
 	connect to sqlsvr as sdat (datasrc=&PROJ &SQL_OPTIMAL);
 
 	create table WORK.dimdrug as select * from connection to sdat
 		(
-		select * from CDWWork.Dim.DrugClass;
+		select * from CDWWork&CWnum..Dim.DrugClass&vwsuff;
 		); * by sdat;
 
 	create table WORK.dimlocdrug as select *, 'L' as sidsource from connection to sdat
 		(
-			select a.VAclassification, a.drugclassSID, b.drugnamewithoutdose, a.localdrugSID, a.ndc
+			select a.VAclassification, a.drugclassSID, a.sta3n, b.drugnamewithoutdose, a.localdrugSID, a.ndc
 			from
-				CDWWork.Dim.LocalDrug A
+				CDWWork&CWnum..Dim.LocalDrug&vwsuff A
 				inner join
-				CDWWork.Dim.DrugNameWithoutDose B
-				on a.drugnamewithoutdoseSID=b.drugnamewithoutdoseSID;
+				CDWWork&CWnum..Dim.DrugNameWithoutDose&vwsuff B
+				on a.drugnamewithoutdoseSID=b.drugnamewithoutdoseSID and a.sta3n=b.sta3n;
 		); * by sdat;
 
 	create table WORK.dimnatdrug as select *, ' ' as ndc length=50, 'N' as sidsource length=1 
 	from connection to sdat
 		(
-			select c.DrugClassCode as VAclassification, a.primarydrugclassSID as drugclassSID, 
+			select c.DrugClassCode as VAclassification, a.primarydrugclassSID as drugclassSID, a.sta3n,
 			b.drugnamewithoutdose, a.nationaldrugSID as localdrugSID
 			from
-				CDWWork.Dim.NationalDrug A
+				CDWWork&CWnum..Dim.NationalDrug&vwsuff A
 				inner join
-				CDWWork.Dim.DrugNameWithoutDose B
-				on a.drugnamewithoutdoseSID=b.drugnamewithoutdoseSID
+				CDWWork&CWnum..Dim.DrugNameWithoutDose&vwsuff B
+				on a.drugnamewithoutdoseSID=b.drugnamewithoutdoseSID and a.sta3n=b.sta3n
 				inner join
-				CDWWork.Dim.DrugClass C
-				on a.PrimaryDrugClassSID=c.drugclassSID
+				CDWWork&CWnum..Dim.DrugClass&vwsuff C
+				on a.PrimaryDrugClassSID=c.drugclassSID and a.sta3n=c.sta3n
 		); * by sdat;
 
 	disconnect from sdat;
@@ -146,7 +155,7 @@ pull_drugs() as shown in the example call at the bottom.
 
 	
 	%if &inclNatDrug %then %do;
-		proc sql;
+		proc sql undo_policy=NONE;
 		create table WORK.dimlocdrug as
 		select * from WORK.dimlocdrug
 		UNION ALL
@@ -167,7 +176,7 @@ pull_drugs() as shown in the example call at the bottom.
 	data WORK.dimlocdrug;
 	length drugclass $10 drugnamewithoutdose $100 ndc $13;
 	set WORK.dimlocdrug (keep=VAclassification /* edit 08 Feb 2022 - VINCI removed column drugclass... drugclass*/ 
-		drugclassSID drugnamewithoutdose localdrugSID ndc sidsource RENAME=(VAclassification=DRUGCLASS));
+		drugclassSID sta3n drugnamewithoutdose localdrugSID ndc sidsource RENAME=(VAclassification=DRUGCLASS));
 	length weird_ndc $1;
 	if missing(ndc) then do;
 		weird_ndc='m';
@@ -209,9 +218,9 @@ pull_drugs() as shown in the example call at the bottom.
 	%let more_drugs=1;
 	%let N=0;
 
-	data WORK.base (rename=(drugclassSID=dcs&N drugclasscode=dcc&N drugclassification=class&N));
+	data WORK.base (rename=(drugclassSID=dcs&N sta3n=_sta3n&N drugclasscode=dcc&N drugclassification=class&N));
 	length drugclassSID 8 drugclasscode $5 drugclassification $50; * this will definitely truncate! ;
-	set &drugclassfile (keep=drugclassSID drugclasscode drugclassification parentdrugclassSID);
+	set &drugclassfile (keep=drugclassSID sta3n drugclasscode drugclassification parentdrugclassSID);
 	WHERE parentdrugclassSID=-1 and drugclassSID>0;
 	if lowcase(drugclasscode)='*unkn' THEN DELETE;
 	drop parentdrugclassSID;
@@ -222,7 +231,7 @@ pull_drugs() as shown in the example call at the bottom.
 
 	proc sort data=WORK.base NODUPKEY; by dcs&N; run;
 
-	proc sql noprint;
+	proc sql undo_policy=NONE noprint;
 	select count(distinct dcc&N) into :totdrugs from WORK.base;
 	quit;
 
@@ -233,14 +242,15 @@ pull_drugs() as shown in the example call at the bottom.
 		%let Nlast=&N;
 		%let N=%eval(&N+1);
 
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		create table WORK.base as
-		select distinct a.*, b.drugclassSID as dcs&N, b.drugclasscode as dcc&N length=5, drugclassification as class&N length=50
+		select distinct a.*, b.drugclassSID as dcs&N, b.sta3n as _sta3n&N, 
+		b.drugclasscode as dcc&N length=5, drugclassification as class&N length=50
 		from
 			WORK.base A
 			left join
 			&drugclassfile B
-			on a.dcs&Nlast=b.parentdrugclassSID
+			on a.dcs&Nlast=b.parentdrugclassSID and a._sta3n&Nlast=b.sta3n
 		order by &orderstr;
 		
 		select count(distinct dcc&N) into :countdcc from WORK.base
@@ -267,15 +277,15 @@ pull_drugs() as shown in the example call at the bottom.
 
 	data WORK.base;
 	set WORK.base;
-	drop dcs:;
+	drop dcs: _sta3n:;
 	run;
 
 	proc sort data=WORK.base NODUP; by %do i=1 %to &Nlast; dcc&i %end;; run;
 
-	proc sql;
+	proc sql undo_policy=NONE;
 	create table WORK.base as
 	select DISTINCT a.*, b.drugclass as ldclass, . as classnum length=3, 
-	lowcase(b.drugnamewithoutdose) as drugname, b.ndc %if &keeplocSID %then , b.localdrugSID, b.sidsource;
+	lowcase(b.drugnamewithoutdose) as drugname, b.ndc %if &keeplocSID %then , b.localdrugSID, b.sta3n, b.sidsource;
 	from 
 		WORK.base A
 		INNER join
@@ -313,7 +323,7 @@ pull_drugs() as shown in the example call at the bottom.
 %macro smush_search(inds=, class_search=, drug_search=, ext=);
 
 	%if &class_search^= %then %do;
-		proc sql;
+		proc sql undo_policy=NONE;
 		create table search_by_class as
 		select distinct 'CL' as search_type length=2, b.search_term,
 		a.dcc0, a.class0, a.dcc1, a.class1, a.dcc2, a.class2, a.classnum, a.drugname 
@@ -330,7 +340,7 @@ pull_drugs() as shown in the example call at the bottom.
 		order by b.search_term, a.dcc0, a.dcc1, a.dcc2;
 	%end;
 	%if &drug_search^= %then %do;
-		proc sql;
+		proc sql undo_policy=NONE;
 		create table search_by_drugname as
 		select distinct 'NM' as search_type length=2, b.search_term,
 		a.dcc0, a.class0, a.dcc1, a.class1, a.dcc2, a.class2, a.classnum, a.drugname
@@ -338,7 +348,15 @@ pull_drugs() as shown in the example call at the bottom.
 			&inds A
 			inner join
 			&drug_search B
-			on upcase(a.drugname) LIKE trim(upcase(b.search_term)) OR upcase(a.ndc) LIKE trim(upcase(b.search_term))
+			%if &exactNDC %then %do;
+				on a.ndc=b.search_term
+			%end;
+			%else %do;
+				on upcase(a.drugname) LIKE trim(upcase(b.search_term)) 
+					%if &allow_partial_NDC %then %do;
+						OR upcase(a.ndc) LIKE trim(upcase(b.search_term))
+					%end;
+			%end;
 		order by b.search_term, a.dcc0, a.dcc1, a.dcc2;
 	%end;
 	
@@ -363,7 +381,7 @@ pull_drugs() as shown in the example call at the bottom.
 
 	%if %symexist(CWD) %then %do;
 		proc export data=_nocommas dbms=csv replace
-		outfile="&CWD/drug_search_results&ext..csv";
+			outfile="&CWD/drug_search_results&ext..csv";
 		run;
 	%end;
 
@@ -373,23 +391,23 @@ pull_drugs() as shown in the example call at the bottom.
 %macro mkdrugfile(inds=, class_search=, drug_search=);
 
 	%if &class_search^= %then %do;
-		proc sql;
+		proc sql undo_policy=NONE;
 		create table SIDs_from_class as
-		select distinct b.search_term, a.dcc0 as classID length=5, a.class0 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sidsource
+		select distinct b.search_term, a.dcc0 as classID length=5, a.class0 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sta3n, a.sidsource
 		from 
 			&inds A
 			inner join
 			&class_search B
 			on upcase(a.dcc0) LIKE trim(upcase(b.search_term)) OR upcase(a.class0) LIKE trim(upcase(b.search_term))
 		UNION
-		select distinct b.search_term, a.dcc1 as classID length=5, a.class1 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sidsource
+		select distinct b.search_term, a.dcc1 as classID length=5, a.class1 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sta3n, a.sidsource
 		from 
 			&inds A
 			inner join
 			&class_search B
 			on upcase(a.dcc1) LIKE trim(upcase(b.search_term)) OR upcase(a.class1) LIKE trim(upcase(b.search_term))
 		UNION
-		select distinct b.search_term, a.dcc2 as classID length=5, a.class2 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sidsource
+		select distinct b.search_term, a.dcc2 as classID length=5, a.class2 as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sta3n, a.sidsource
 		from 
 			&inds A
 			inner join
@@ -399,15 +417,23 @@ pull_drugs() as shown in the example call at the bottom.
 		quit;
 	%end;
 	%if &drug_search^= %then %do;
-		proc sql;
+		proc sql undo_policy=NONE;
 		create table SIDs_from_drugname as
 		select distinct b.search_term, coalesceC(a.dcc2, a.dcc1, a.dcc0) as classID length=5,  /* note this takes the lowest-level class available */
-		coalesceC(a.class2, a.class1, a.class0) as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sidsource
+		coalesceC(a.class2, a.class1, a.class0) as class length=50, a.drugname, a.ndc, a.localdrugSID, a.sta3n, a.sidsource
 		from
 			&inds A
 			inner join
 			&drug_search B
-			on upcase(a.drugname) LIKE trim(upcase(b.search_term)) OR upcase(a.ndc) LIKE trim(upcase(b.search_term))
+			%if &exactNDC %then %do;
+				on a.ndc=b.search_term
+			%end;
+			%else %do;
+				on upcase(a.drugname) LIKE trim(upcase(b.search_term)) 
+					%if &allow_partial_NDC %then %do;
+						OR upcase(a.ndc) LIKE trim(upcase(b.search_term))
+					%end;
+			%end;
 		order by search_term, classID, class, drugname, ndc, localdrugSID;
 	%end;
 
@@ -429,6 +455,20 @@ pull_drugs() as shown in the example call at the bottom.
 	CC=Src  /* CC: Src or Dflt -- location of CohortCrosswalk */
 	);
 
+	%if %symexist(chkSrc3)=0 %then %do;
+		%put ::: ERROR: to use the pull_drugs macro, you must either run the getSIDs macro first (in this program) ;
+		%put ::: ...or create a comparable SIDs file and also create the macro variable chkSrc3 (set to 0 or 1) ;
+		%put ::: SAS is quitting ;
+		%abort cancel;
+	%end;
+
+	%let CWnum=;
+	%let vwsuff=;
+	%if &chksrc3 %then %do;
+		%let vwsuff=_EHR;
+		%let CWnum=3;
+	%end;
+
 	%if &rxppl^= %then %do;
 		data sdat.'#rxppl'n (dbtype=(patientICN="varchar(50)"));
 		set &rxppl (keep=patientICN);
@@ -446,23 +486,23 @@ pull_drugs() as shown in the example call at the bottom.
 
 	%let nnsids=0;
 
-	proc sql noprint;
+	proc sql undo_policy=NONE noprint;
 	select count(*) into :nnsids from &sidsfile WHERE sidsource='N';
 	quit;
 
 	proc sort data=WORK.SIDs NODUPKEY;
-	by localdrugSID;
+	by localdrugSID sta3n;
 	run;
 
 	* transfer the drug SIDs for drugs of interest to SQL Server... ;
 	data sdat.'#LDsids'n (dbtype=(search_term='varchar(50)' class='varchar(50)' 
 		drugname='varchar(100)' ndc='varchar(13)' localdrugSID='bigint'));
-	set WORK.SIDs (keep=search_term class drugname ndc localdrugSID);
+	set WORK.SIDs (keep=search_term class drugname ndc localdrugSID sta3n);
 	run;
 
 	%if &nnsids %then %do;
 		proc sort data=WORK.nSIDs NODUPKEY;
-		by localdrugSID;
+		by localdrugSID sta3n;
 		run;
 		
 		data sdat.'#NDsids'n (dbtype=(search_term='varchar(50)' class='varchar(50)' 
@@ -471,7 +511,7 @@ pull_drugs() as shown in the example call at the bottom.
 		run;
 	%end;
 
-	proc sql;
+	proc sql undo_policy=NONE;
 	connect to sqlsvr as sdat (datasrc=&PROJ &SQL_OPTIMAL);
 
 	%if &rxppl= %then %do;
@@ -479,20 +519,20 @@ pull_drugs() as shown in the example call at the bottom.
 	%end;
 
 	create table WORK.rxtemp as 
-	select DISTINCT patientICN length=10, /*patientsid length=8,*/ rxEventSID length=8, parentSID length=8,
-	sta3n length=4, localdrugsid length=8, /*datepart(rxdatetime) as rxdate length=5 format=date9.*/ rxdatetime length=7 format=datetime20.,  
+	select DISTINCT patientICN length=10, patientsid length=8, rxEventSID length=8, parentSID length=8,
+	localdrugsid length=8, sta3n length=4, /*datepart(rxdatetime) as rxdate length=5 format=date9.*/ rxdatetime length=7 format=datetime20.,  
 	dayssupply length=5, qtynumeric length=8, qtychar length=10, unit length=20, infusionrate length=20, mailwindow length=1,
 	search_term length=20, class length=50, drugname length=75, ndc length=13, source length=4
 	from connection to sdat
 
 		(
 		select ptx.patientICN, ptx.patientSID, 
-		drugs.rxoutpatfillSID as rxEventSID, drugs.rxoutpatSID as parentSID, drugs.sta3n, drugs.localdrugSID, 
+		drugs.rxoutpatfillSID as rxEventSID, drugs.rxoutpatSID as parentSID, drugs.sta3n, drugs.localdrugSID,
 		drugs.dayssupply, drugs.filldatetime as rxdatetime, 
 		drugs.qtynumeric, NULL as qtychar, NULL as unit, NULL as infusionrate,
 		drugs.mailwindow, drugs.search_term, drugs.class, drugs.drugname, drugs.ndc, 'OPFL' as source
 		from
-			(select xw.patientICN, xw.patientSID
+			(select xw.patientICN, xw.patientSID, xw.sta3n
 			from
 				#rxppl CP
 				inner join
@@ -500,7 +540,7 @@ pull_drugs() as shown in the example call at the bottom.
 				on cp.patientICN=xw.patientICN) ptx
 		inner join
 
-		(select distinct rx.patientsid, rx.rxoutpatfillSID, rx.rxoutpatSID, rx.sta3n, rx.localdrugsid, 
+		(select distinct rx.patientsid, rx.rxoutpatfillSID, rx.rxoutpatSID, rx.sta3n, rx.localdrugsid,
 		rx.filldatetime, rx.dayssupply, rx.qtynumeric, rx.mailwindow,
 		sids.search_term, sids.class, sids.drugname, sids.ndc
 		from 
@@ -508,13 +548,13 @@ pull_drugs() as shown in the example call at the bottom.
 			inner join 
 			(select patientsid, rxoutpatfillSID, rxoutpatSID, sta3n, localdrugsid, filldatetime, 
 			dayssupply, qtynumeric, mailwindow
-			from [&PROJ].[Src].[RxOut_RxOutpatFill] 
+			from [&PROJ].[Src&CWnum].[RxOut_RxOutpatFill&vwsuff] 
 			where 
 				filldatetime >= cast(%nrbquote(')&startdate.T00:00:00.000%nrbquote(') as datetime2(0))
 				and
 				filldatetime < cast(%nrbquote(')&enddate.T00:00:00.000%nrbquote(') as datetime2(0))) rx
-			on sids.localdrugsid=rx.localdrugsid) drugs
-		on ptx.patientsid=drugs.patientsid
+			on sids.localdrugsid=rx.localdrugsid and sids.sta3n=rx.sta3n) drugs
+		on ptx.patientsid=drugs.patientsid and ptx.sta3n=drugs.sta3n
 
 		%if &nnsids %then %do;
 			UNION ALL
@@ -525,7 +565,7 @@ pull_drugs() as shown in the example call at the bottom.
 			drugs.qtynumeric, NULL as qtychar, NULL as unit, NULL as infusionrate,
 			drugs.mailwindow, drugs.search_term, drugs.class, drugs.drugname, drugs.ndc, 'nOFL' as source
 			from
-				(select xw.patientICN, xw.patientSID
+				(select xw.patientICN, xw.patientSID, xw.sta3n
 				from
 					#rxppl CP
 					inner join
@@ -533,7 +573,7 @@ pull_drugs() as shown in the example call at the bottom.
 					on cp.patientICN=xw.patientICN) ptx
 			inner join
 
-			(select distinct rx.patientsid, rx.rxoutpatfillSID, rx.rxoutpatSID, rx.sta3n, rx.localdrugsid, 
+			(select distinct rx.patientsid, rx.rxoutpatfillSID, rx.rxoutpatSID, rx.sta3n, rx.localdrugsid,
 			rx.filldatetime, rx.dayssupply, rx.qtynumeric, rx.mailwindow,
 			sids.search_term, sids.class, sids.drugname, sids.ndc
 			from 
@@ -541,13 +581,13 @@ pull_drugs() as shown in the example call at the bottom.
 				inner join 
 				(select patientsid, rxoutpatfillSID, rxoutpatSID, sta3n, localdrugsid, nationaldrugsid, filldatetime, 
 				dayssupply, qtynumeric, mailwindow
-				from [&PROJ].[Src].[RxOut_RxOutpatFill] 
+				from [&PROJ].[Src&CWnum].[RxOut_RxOutpatFill&vwsuff] 
 				where 
 					filldatetime >= cast(%nrbquote(')&startdate.T00:00:00.000%nrbquote(') as datetime2(0))
 					and
 					filldatetime < cast(%nrbquote(')&enddate.T00:00:00.000%nrbquote(') as datetime2(0))) rx
 				on sids.NATIONALdrugsid=rx.NATIONALdrugsid) drugs
-			on ptx.patientsid=drugs.patientsid
+			on ptx.patientsid=drugs.patientsid and ptx.sta3n=drugs.sta3n
 		%end;
 
 		UNION ALL
@@ -558,7 +598,7 @@ pull_drugs() as shown in the example call at the bottom.
 		drugs.dosesgiven as qtynumeric, NULL as qtychar, drugs.unitofadministration as unit, drugs.infusionrate,
 		'-' as mailwindow, drugs.search_term, drugs.class, drugs.drugname, drugs.ndc, 'BCDI' as source
 		from
-			(select xw.patientICN, xw.patientSID
+			(select xw.patientICN, xw.patientSID, xw.sta3n
 			from
 				#rxppl CP
 				inner join
@@ -578,17 +618,17 @@ pull_drugs() as shown in the example call at the bottom.
 				localdrugSID, actiondatetime, 
 				dosesgiven, 			/* <<-- the Dispensed Drug table has a NUMERIC type column named doseSgiven */
 				unitofadministration   
-				from [&PROJ].[Src].[BCMA_BCMADispensedDrug]
+				from [&PROJ].[Src&CWnum].[BCMA_BCMADispensedDrug&vwsuff]
 				where
 					actiondatetime >= cast(%nrbquote(')&startdate.T00:00:00.000%nrbquote(') as datetime2(0))
 					and
 					actiondatetime < cast(%nrbquote(')&enddate.T00:00:00.000%nrbquote(') as datetime2(0))) bd
 				inner join
-				[&PROJ].[Src].[BCMA_BCMAMedicationLog] ml
-				on bd.BCMAmedicationlogsid=ml.BCMAmedicationlogsid) rx
+				[&PROJ].[Src&CWnum].[BCMA_BCMAMedicationLog&vwsuff] ml
+				on bd.BCMAmedicationlogsid=ml.BCMAmedicationlogsid and bd.sta3n=ml.sta3n) rx
 
-			on sids.localdrugsid=rx.localdrugsid) drugs
-		on ptx.patientSID=drugs.patientSID
+			on sids.localdrugsid=rx.localdrugsid and sids.sta3n=rx.sta3n) drugs
+		on ptx.patientSID=drugs.patientSID and ptx.sta3n=drugs.sta3n
 
 		UNION ALL
 
@@ -598,7 +638,7 @@ pull_drugs() as shown in the example call at the bottom.
 		NULL as qtynumeric, drugs.dosesgiven as qtychar, drugs.unitofadministration as unit, drugs.infusionrate,
 		'-' as mailwindow, drugs.search_term, drugs.class, drugs.drugname, drugs.ndc, 'BCSO' as source
 		from
-			(select xw.patientICN, xw.patientSID
+			(select xw.patientICN, xw.patientSID, xw.sta3n
 			from
 				#rxppl CP
 				inner join
@@ -618,20 +658,20 @@ pull_drugs() as shown in the example call at the bottom.
 				IVSolutionIngredientSID, actiondatetime, 
 				dosesgiven, 		/* <<-- the Solution table has a character type column named doseSgiven */
 				unitofadministration
-				from [&PROJ].[Src].[BCMA_BCMASolution]
+				from [&PROJ].[Src&CWnum].[BCMA_BCMASolution&vwsuff]
 				where
 					actiondatetime >= cast(%nrbquote(')&startdate.T00:00:00.000%nrbquote(') as datetime2(0))
 					and
 					actiondatetime < cast(%nrbquote(')&enddate.T00:00:00.000%nrbquote(') as datetime2(0))) bs
 				inner join
-				[CDWWork].[Dim].[IVSolutionIngredient] ivs
-				on bs.ivsolutionIngredientSID=ivs.ivsolutionIngredientSID
+				[CDWWork&CWnum].[Dim].[IVSolutionIngredient&vwsuff] ivs
+				on bs.ivsolutionIngredientSID=ivs.ivsolutionIngredientSID and bs.sta3n=ivs.sta3n
 				inner join
-				[&PROJ].[Src].[BCMA_BCMAMedicationLog] ml
-				on bs.BCMAmedicationlogsid=ml.BCMAmedicationlogsid
+				[&PROJ].[Src&CWnum].[BCMA_BCMAMedicationLog&vwsuff] ml
+				on bs.BCMAmedicationlogsid=ml.BCMAmedicationlogsid and bs.sta3n=ml.sta3n
 				) rx
-			on sids.localdrugSID=rx.localdrugSID) drugs
-		on ptx.patientSID=drugs.patientSID
+			on sids.localdrugSID=rx.localdrugSID and sids.sta3n=rx.sta3n) drugs
+		on ptx.patientSID=drugs.patientSID and ptx.sta3n=drugs.sta3n
 
 		UNION ALL
 
@@ -641,7 +681,7 @@ pull_drugs() as shown in the example call at the bottom.
 		NULL as qtynumeric, drugs.dosegiven as qtychar, drugs.unitofadministration as unit, drugs.infusionrate,
 		'-' as mailwindow, drugs.search_term, drugs.class, drugs.drugname, drugs.ndc, 'BCAD' as source
 		from
-			(select xw.patientICN, xw.patientSID
+			(select xw.patientICN, xw.patientSID, xw.sta3n
 			from
 				#rxppl CP
 				inner join
@@ -661,20 +701,20 @@ pull_drugs() as shown in the example call at the bottom.
 				IVAdditiveIngredientSID, actiondatetime, 
 				dosegiven, 	/* <<-- the additive table has a character type column named dosegiven (not doseSgiven) */
 				unitofadministration 
-				from [&PROJ].[Src].[BCMA_BCMAAdditive]
+				from [&PROJ].[Src&CWnum].[BCMA_BCMAAdditive&vwsuff]
 				where
 					actiondatetime >= cast(%nrbquote(')&startdate.T00:00:00.000%nrbquote(') as datetime2(0))
 					and
 					actiondatetime < cast(%nrbquote(')&enddate.T00:00:00.000%nrbquote(') as datetime2(0))) ba
 				inner join
-				[CDWWork].[Dim].[IVAdditiveIngredient] iva
-				on ba.IVAdditiveIngredientSID=iva.IVAdditiveIngredientSID
+				[CDWWork&CWnum].[Dim].[IVAdditiveIngredient&vwsuff] iva
+				on ba.IVAdditiveIngredientSID=iva.IVAdditiveIngredientSID and ba.sta3n=iva.sta3n
 				inner join
-				[&PROJ].[Src].[BCMA_BCMAMedicationLog] ml
-				on ba.BCMAmedicationlogsid=ml.BCMAmedicationlogsid
+				[&PROJ].[Src&CWnum].[BCMA_BCMAMedicationLog&vwsuff] ml
+				on ba.BCMAmedicationlogsid=ml.BCMAmedicationlogsid and ba.sta3n=ml.sta3n
 				) rx
-			on sids.localdrugSID=rx.localdrugSID) drugs
-		on ptx.patientSID=drugs.patientSID
+			on sids.localdrugSID=rx.localdrugSID and sids.sta3n=rx.sta3n) drugs
+		on ptx.patientSID=drugs.patientSID and ptx.sta3n=drugs.sta3n
 
 
 		);
@@ -695,18 +735,10 @@ pull_drugs() as shown in the example call at the bottom.
 
 
 %let PROJ=ORD_Korves_202209016D;  * ORD project ;
-%let CWD=;   * set this to an output path, e.g., /data/dart/2022/ord_korves_202209016d/Data, for QC output - optional ;
+%let CC=Src; * location of CohortCrosswalk -- either Src or Dflt ;
 
 libname sdat sqlsvr datasrc=&PROJ &sql_optimal schema=dflt;
 
-* NOTE: the classfmt, namesfmt, and rxfmt datasets created below are 
-optional - they are not used by the macro - instead, they just provide
-a way to label drugs in the output file with the user-defined drug group
-they belong to (if relevant) ;
-
-* NOTE: the getSIDs macro call requires ONE or BOTH of the CLASS or NAMES datasets, 
-which are search terms used to find drug SIDs by way of drug class or drug name, 
-respectively.  Overlaps between the two are OK. ;
 
 data 
 	class (keep=search_term)
@@ -772,38 +804,69 @@ if last then do;
 end;
 run;
 
-proc format cntlin=rxfmt; run;  
+proc format cntlin=rxfmt; run;  */
 
+/*
 
 %let sidlib=WORK;
 %let startdate=2020-01-01;
 %let enddate=2021-12-31;
 
-%getSIDs(outlib=&sidlib, hasNamesFile=1, hasClassFile=1);  * produces WORK.localdrugSIDs ; 
+%getSIDs(outlib=&sidlib);  * produces WORK.localdrugSIDs ; 
 
-* OPTIONAL: create a list of patientICNs (in a SAS dataset) to pull drugs for, and
-then specify the name of this dataset in the RXPPL argument below... 
-  - if left out, everyone in the CohortCrosswalk will be used ;
+* create a population to pull drugs for... ;
+data poslabs; 
+set surnew.covid_labs_clean (keep=patientICN resclean specdatetime);
+where resclean='P';
+length specdate 5;
+format specdate date9.;
+specdate=datepart(specdatetime);
+drop specdatetime;
+IF '01Jan2020'd<=specdate<='31Dec2021'd;
+run;
+
+data covdx;
+set surnew.covid_dx_va20202021 (keep=patientICN admit_or_vis_datetime factype code);
+where code='U07.1';
+length dxdate 5;
+format dxdate date9.;
+dxdate=datepart(admit_or_vis_datetime);
+drop admit_or_vis_datetime;
+IF '01Jan2020'd<=dxdate<='31Dec2021'd;
+run;
+
+data covppl;
+set
+	poslabs
+	covdx
+	;
+keep patientICN;
+run;
+
+proc sort data=covppl NODUPKEY; by patientICN; run;
 
 * pull drugs of interest for population ;
 %pull_drugs(
-	rxppl=,  
+	rxppl=covppl, 
 	sidsFile=WORK.localdrugSIDs,
 	startdate=&startdate,
 	enddate=&enddate,
-	CC=Src);  
+	CC=Dflt);  
 
-* the output of the above macro call is WORK.rxtemp ;
 
-* SAMPLE PROCESSING OF OUTPUT FILE WORK.rxtemp (from pull_drugs()) ;
-** add an Rx category variable using the format created earlier and save a permanent dataset ;
+SAMPLE PROCESSING OF OUTPUT FILE WORK.rxtemp (from %pull_drugs())...
 
 data req.varx;
 set WORK.rxtemp;
-rxcat=put(search_term, $frxcat.);
+if source in ('BCSO', 'BCAD') then do;
+	qtynumeric=scan(qtychar,1,' ')*1;
+	unit=coalesceC(unit, scan(qtychar,2,' '));
+end;
+drop qtychar;  * <<-- might want to hang on to this and take a look ;
 run;
 
 title "SEARCH TERM * DATA SOURCE";
 proc freq data=req.varx;
 table search_term * source/missing;
-run; */
+run;  */
+

@@ -1,11 +1,10 @@
 /*
 	Take a user-supplied list of patients with indexdates (can be >1 indexdate per person) and a user-supplied
-	list of disease definitions (ICD-9/10 codes with short labels) and link these to inpatient and outpatient 
-	encounter diagnosis data in CDW.  
+	list of disease definitions and link these to inpatient and outpatient encounter diagnosis data in CDW.  
 
 	Create a permanent table of the above query on the SQL Server side (and, optionally, a view to that table 
-	on the SAS Grid side) and also allow collapsing all diseases to the patient~index level using standard 
-	1 inpt / 2 outpt method.  
+	on the SAS Grid side) and also allow collapsing all diseases to the patient level using standard 1 inpt / 2 outpt 
+	method.  
 
 	Jeremy Smith
 	Jan 2018
@@ -16,10 +15,15 @@
 		event-level output -- in order to get this field, user must set the IPDX parameter to use 
 		Src.Inpat_InpatientDiagnosis (as opposed to Src.Inpat_InpatDischargeDiagnosis).
 
+	UPDATE 29 Jan 2025: added capacity to use Src3 (combined Vista + Millenium) data instead of just Vista-based data.
+		To do this, specify the relevant Src3 SQL views (all of which will have the suffix '_EHR') in the 
+		ipstays, ipdx, opstays, and opdx parameters.  Doing so will cause the macro to automatically use the
+		corresponding Dim tables.
+
 	================================================================================================================ */
 
 %MACRO pull_dxpx(
-	ptfile=,		/* should contain: patientICN (8), indexdate (8 - date or datetime) */
+	ptfile=,		/* should contain: patientICN ($10), indexdate (date or datetime) */
 	codefile=,		/* should contain: code ($10), codetype ($6), condition ($32) 
 					-- condition should be variable name-friendly! */
 	fixdxcodes=1,		/* forces decimal point (at position 4) if not already present into dx codes with length>3 - also forces to upper case */
@@ -33,6 +37,7 @@
 	create_event_file=1,
 	create_view=1,			/* create a view (on the SAS side) of the output table (on the SQL Server side) */
 		VWLIB=,		/* if not specified, view will be created in the parent directory (on the SAS side) for project <datsrc> */	
+	create_sas_event_file=0,	/* if set to 1, creates a SAS dataset (instead of view) in VWLIB - NOTE this will delete the underlying SQL tables! */
 	event_file=dxevents,		/* name of permanent dx event-level output table to be created on SQL side (Dflt schema for <datsrc>) */
 	event_file_ext=,		/* suffix to be added to end of event_file name -- optional -- in general, you don't need this. */
 	create_ptlev_file=1,		/* 0: do not create a pt-level file.  1: apply 1-inpt/2-outpt rule and summarize conditions to person-level */
@@ -61,6 +66,7 @@
 		%let event_file=dxevents;
 	%end;
 	%if &create_ptlev_file=0 %then %do;
+		%put ::: dropSQLtable was reset to 0 because you selected create_ptlev_file=0 ;
 		%let dropSQLtable=0;
 	%end;
 	%if &dhandle= %then %do;
@@ -69,6 +75,46 @@
 	%let ip_use_ipdx=0;
 	%if %lowcase(&ipdx)=src.inpat_inpatientdiagnosis %then %do;
 		%let ip_use_ipdx=1;
+	%end;
+	
+	%let srcerror=0;
+	%let srcext=;
+	%let SrcNum=;
+
+	data _null_;
+	length ipstays ipdx opstays opdx $75;
+	array d {*} ipstays ipdx opstays opdx;
+	ipstays=upcase("&ipstays");
+	ipdx=upcase("&ipdx");
+	opstays=upcase("&opstays");
+	opdx=upcase("&opdx");
+	EHRcount=0;
+	do i=1 to dim(d);
+		if substr(d[i],length(d[i])-3)='_EHR' then do;
+			EHRcount+1;
+			if substr(d[i],1,4)='SRC.' then do;
+				d[i]=tranwrd(d[i],"SRC.","SRC3.");
+				call symputx(vname(d[i]),d[i]);
+			end;
+		end;
+	end;
+	if EHRcount=0 then call symputx("useSrc3",0);
+	else if EHRcount=dim(d) then do;
+		call symputx("useSrc3",1);
+		call symputx("srcext","_EHR");
+		call symputx("SrcNum",3);
+	end;
+	else call symputx("srcerror",1);
+	run;
+	
+	%if &srcerror %then %do;
+		%put ::: ERROR: if any tables have the suffix _EHR then all 4 tables must have this extension ;
+		%put ::: tables: &ipstays &ipdx &opstays &opdx;
+		%put ::: SAS is quitting! ;
+		%abort cancel;
+	%end;
+	%if &useSrc3 %then %do;
+		%put ::: USING SOURCE3 (Vista + Millenium) DATA ;
 	%end;
 
 	/*
@@ -97,7 +143,7 @@
 		%put :: You must specifiy an output lib (with the VWLIB argument)!;
 		%put :: SAS is quitting;
 		%put ====================================================================== ;
-		endsas;
+		%abort;
 	%end;	
 
 	%if &create_event_file %then %do;
@@ -108,13 +154,13 @@
 			%put ===================================================================== ;
 			%put :: You must specify a PTFILE in the macro call! SAS is quitting.... ;
 			%put ===================================================================== ;
-			endsas;
+			%abort;
 		%end;
 		%if &codefile= %then %do;
 			%put ===================================================================== ;
 			%put :: You must specify a CODEFILE in the macro call! SAS is quitting.... ;
 			%put ===================================================================== ;
-			endsas;
+			%abort;
 		%end;
 
 		%if %length(&CODES)>32 %then %do;
@@ -122,7 +168,7 @@
 			%put :: One of your output table names is too long: &CODES; 
 			%put :: Shorten your event_file (&event_file) or event_file_ext (&event_file_ext) and re-run! ;	
 			%put ============================================================================================= ;
-			endsas;
+			%abort;
 		%end;
 
 		%put ================================================================================ ;
@@ -139,7 +185,7 @@
 		%let ptstructureOK=0;
 		%let missfmt=0;
 
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		** check ptfile ;
 		select (count(*)=2) into :ptvarsOK from dictionary.columns where 
 		upcase(name) in ("PATIENTICN","INDEXDATE") and libname=upcase("%scan(&ptfile,1,.)")
@@ -179,7 +225,7 @@
 			if upcase(codetype)='DX9' then codetype='Dx09';
 			run;
 
-			proc sql noprint;
+			proc sql undo_policy=NONE noprint;
 			select count(*) into :badtypes from &codefile where upcase(codetype) not in ('DX09', 'DX10');
 			quit;
 		%end;
@@ -208,7 +254,7 @@
 		* push the ptfile and codefile to the SQL side ;
 		libname user sqlsvr schema=Dflt &SQL_OPTIMAL;
 		
-		proc sql;
+		proc sql undo_policy=NONE;
 		connect to sqlsvr as user (datasrc=&dhandle &sql_optimal);
 		/*
 		*execute(%dropit(Dflt.&PPL);) by user;
@@ -267,7 +313,7 @@
 		proc print data=&codefile (obs=10) width=min; run;
 		title;
 
-		proc sql;
+		proc sql undo_policy=NONE;
 		connect to sqlsvr as user (datasrc=&dhandle &sql_optimal);
 
 		/*execute(use [&datsrc];) by user;*/
@@ -276,7 +322,8 @@
 
 		execute(
 			create table Dflt.&OUTTABLE 
-			(patientICN VARCHAR(10), indexdate DATETIME2(0), inpat_or_vis_SID BIGINT, admit_or_vis_datetime DATETIME2(0),
+			(patientICN VARCHAR(10), indexdate DATETIME2(0), patientSID BIGINT, sta3n SMALLINT, 
+			inpat_or_vis_SID BIGINT, admit_or_vis_datetime DATETIME2(0),
 			disch_or_vis_datetime DATETIME2(0), PrStopCode VARCHAR(6), PrStopCodeName VARCHAR(30), 
 			SERVICECATEGORY VARCHAR(8), ENCOUNTERTYPE VARCHAR(8), dxpos VARCHAR(1), FACTYPE VARCHAR(8), 
 			condition VARCHAR(32), %if &ip_use_ipdx=1 %then POAindicator VARCHAR(4),; 
@@ -290,17 +337,18 @@
 			set @LBend=dateadd(dd,0,(select max(indexdate) from Dflt.&PPL));
 
 			INSERT INTO Dflt.&OUTTABLE WITH (TABLOCK)	/* this option helps avoid filling up the transaction log */ 
-			(patientICN, indexdate, inpat_or_vis_SID, admit_or_vis_datetime, disch_or_vis_datetime, PrStopCode, PrStopCodeName,
+			(patientICN, indexdate, patientSID, sta3n, inpat_or_vis_SID, admit_or_vis_datetime, disch_or_vis_datetime, PrStopCode, PrStopCodeName,
 			servicecategory, encountertype, dxpos, factype, condition, %if &ip_use_ipdx=1 %then POAindicator,; 
 			codetype, code, rawcode) 
 
-				select DISTINCT SHELL.patientICN, SHELL.indexdate, SHELL.inpat_or_vis_SID, SHELL.admit_or_vis_datetime, 
+				select DISTINCT SHELL.patientICN, SHELL.indexdate, SHELL.patientSID, SHELL.sta3n, 
+				SHELL.inpat_or_vis_SID, SHELL.admit_or_vis_datetime, 
 				SHELL.disch_or_vis_datetime, SHELL.PrStopCode, SHELL.PrStopCodeName, SHELL.servicecategory, SHELL.encountertype,
 				SHELL.dxpos, SHELL.FACTYPE, SHELL.condition, %if &ip_use_ipdx=1 %then SHELL.POAindicator,; 
 				SHELL.codetype, SHELL.code, SHELL.rawcode from
 
 				( 
-				select ASIDE.patientICN, ASIDE.inpatientSID as inpat_or_vis_SID, ASIDE.patientSID, 
+				select ASIDE.patientICN, ASIDE.inpatientSID as inpat_or_vis_SID, ASIDE.patientSID, ASIDE.sta3n,
 				ASIDE.indexdate, ASIDE.admitdatetime as admit_or_vis_datetime, 
 				ASIDE.dischargedatetime as disch_or_vis_datetime, NULL as PrStopCode, NULL as PrStopCodeName, 
 				ASIDE.servicecategory, ASIDE.encountertype, case when pdxsid=codesid then 'P' else 'S' end as dxpos,
@@ -309,9 +357,9 @@
 
 
 					/* Aside (admissions) -- inpatient -- join inpt stay table to cohort via cohort xwalk */
-					(select STAYS.patientSID, STAYS.inpatientsid, STAYS.servicecategory, STAYS.encountertype, STAYS.pdxsid, 
+					(select STAYS.patientSID, STAYS.sta3n, STAYS.inpatientsid, STAYS.servicecategory, STAYS.encountertype, STAYS.pdxsid,
 					STAYS.FACTYPE, STAYS.admitdatetime, STAYS.dischargedatetime, COHX.patientICN, COHX.indexdate from
-						(select patientsid, inpatientsid, 
+						(select patientsid, sta3n, inpatientsid, 
 							cast('z' as VARCHAR(8)) as servicecategory, cast('z' as varchar(8)) as encountertype,
 							cast('INPT' as VARCHAR(8)) as FACTYPE, 
 							admitdatetime, dischargedatetime,
@@ -319,16 +367,17 @@
 								when principaldiagnosisICD10SID>1 then principaldiagnosisICD10SID 
 								else principaldiagnosisICD9SID 
 							end as pdxsid
+							
 							from &IPSTAYS WHERE 
 								%if &ip_use_dischdate %then dischargedatetime>=@LBstart and dischargedatetime<=@LBend;
 								%else admitdatetime>=@LBstart and admitdatetime<=@LBend;
 								) STAYS
 						INNER JOIN		
 						
-						(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid 
+						(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid, ptxw.sta3n
 							from Dflt.&PPL coh inner join &xwloc..CohortCrosswalk ptxw
 							on coh.patientICN=ptxw.patientICN) COHX
-						ON STAYS.patientsid=COHX.patientsid and 
+						ON STAYS.patientsid=COHX.patientsid and STAYS.sta3n=COHX.sta3n and
 						datediff(d,%if &ip_use_dischdate %then STAYS.dischargedatetime; %else STAYS.admitdatetime;, COHX.indexdate) 
 						between 0 and &DXLOOKBACK) ASIDE
 					/* End of Aside -- inpatient */
@@ -336,17 +385,17 @@
 					INNER JOIN
 
 					/* Dside (dx codes) -- inpatient -- join inpt disch dx to condition list via icd9/10 dim tables */
-					(select DISCHDX.patientsid, DISCHDX.inpatientsid, DISCHDX.codetype, DISCHDX.codesid, 
+					(select DISCHDX.patientsid, DISCHDX.sta3n, DISCHDX.inpatientsid, DISCHDX.codetype, DISCHDX.codesid, 
 					%if &ip_use_ipdx=1 %then DISCHDX.POAindicator,;
 					CODES.code, CODES.condition, CODES.rawcode from		
-						(select  patientsid, inpatientsid, 'Dx09' as codetype,
+						(select  patientsid, sta3n, inpatientsid, 'Dx09' as codetype,
 							icd9sid as codesid %if &ip_use_ipdx=1 %then , POAindicator;
 							from &IPDX WHERE 
 								%if &ip_use_dischdate %then dischargedatetime>=@LBstart and dischargedatetime<=@LBend;
 								%else admitdatetime>=@LBstart and admitdatetime<=@LBend; 
 								and icd9sid>0
 							UNION ALL
-							select patientsid, inpatientsid, 'Dx10' as codetype,
+							select patientsid, sta3n, inpatientsid, 'Dx10' as codetype,
 							icd10sid as codesid %if &ip_use_ipdx=1 %then , POAindicator;
 							from &IPDX WHERE 
 								%if &ip_use_dischdate %then dischargedatetime>=@LBstart and dischargedatetime<=@LBend; 
@@ -355,7 +404,7 @@
 						INNER JOIN
 
 						(select distinct codelist.code, codelist.codetype, codelist.condition, 
-						codestack.codesid, codestack.rawcode 
+						codestack.codesid, codestack.sta3n, codestack.rawcode 
 							from 
 								%if &allowNULLcodes %then %do;
 									(select case when code is NULL then '' else code end as code, 
@@ -366,19 +415,19 @@
 								%end; codelist
 							INNER JOIN
 
-								(select 'Dx09' as codetype, icd9code as rawcode, icd9sid as codesid
-								from CDWWork.Dim.ICD9
+								(select 'Dx09' as codetype, icd9code as rawcode, icd9sid as codesid, sta3n
+								from CDWWork&SrcNum..Dim.ICD9&SrcExt
 								UNION ALL
-								select 'Dx10' as codetype, icd10code as rawcode, icd10sid as codesid
-								from CDWWork.Dim.ICD10) codestack
+								select 'Dx10' as codetype, icd10code as rawcode, icd10sid as codesid, sta3n
+								from CDWWork&SrcNum..Dim.ICD10&SrcExt) codestack
 							ON codelist.codetype=codestack.codetype and codestack.rawcode 
 								%if &uselike %then LIKE codelist.code+'%'; %else = codelist.code;) CODES
 								
-						ON DISCHDX.codetype=CODES.codetype and DISCHDX.codesid=CODES.codesid) DSIDE
+						ON DISCHDX.codetype=CODES.codetype and DISCHDX.codesid=CODES.codesid and DISCHDX.sta3n=CODES.sta3n) DSIDE
 
 					/* End of Dside -- inpatient */
 
-					ON ASIDE.inpatientsid=DSIDE.inpatientsid
+					ON ASIDE.inpatientsid=DSIDE.inpatientsid and ASIDE.sta3n=DSIDE.sta3n
 
 				/* End of LEFTSIDE Inpatient stuff */
 
@@ -386,7 +435,7 @@
 
 				/* Start of LEFTSIDE Outpatient stuff */
 
-				select ASIDE.patientICN, ASIDE.visitSID as inpat_or_vis_SID, ASIDE.patientSID, 
+				select ASIDE.patientICN, ASIDE.visitSID as inpat_or_vis_SID, ASIDE.patientSID, ASIDE.sta3n,
 				ASIDE.indexdate, ASIDE.visitdatetime as admit_or_vis_datetime, 
 				ASIDE.visitdatetime as disch_or_vis_datetime, ASIDE.StopCode as PrStopCode, ASIDE.StopCodeName as PrStopCodeName, 
 				ASIDE.SERVICECATEGORY, ASIDE.ENCOUNTERTYPE, DSIDE.dxpos,
@@ -395,50 +444,51 @@
 
 
 					/* Aside (visits) -- outpatient -- join outpat visit table to cohort via cohort xwalk */
-					(select STAYS.patientSID, STAYS.visitSID, STAYS.servicecategory, STAYS.encountertype, STAYS.FACTYPE, STAYS.visitdatetime, 
+					(select STAYS.patientSID, STAYS.sta3n, STAYS.visitSID, STAYS.servicecategory, STAYS.encountertype, STAYS.FACTYPE, STAYS.visitdatetime, 
 					COHX.patientICN, COHX.indexdate, SC.StopCode, SC.StopCodeName from
-						(select patientsid, visitSID, servicecategory, encountertype, primarystopcodeSID,
+						(select patientsid, sta3n, visitSID, servicecategory, encountertype, primarystopcodeSID,
 						cast((case when servicecategory in ('D','H','I') then 'inpt' else 'OPAT' end) as VARCHAR(8)) as FACTYPE, visitdatetime
 						from 
 						&OPSTAYS WHERE visitdatetime>=@LBstart and visitdatetime<=@LBend %if &primaryonly %then and encountertype='P';) STAYS
 						INNER JOIN		
 						
-						(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid 
+						(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid, ptxw.sta3n
 							from Dflt.&PPL coh inner join &xwloc..CohortCrosswalk ptxw
 							on coh.patientICN=ptxw.patientICN) COHX
-						ON STAYS.patientsid=COHX.patientsid and 
+						ON STAYS.patientsid=COHX.patientsid and STAYS.sta3n=COHX.sta3n and
 						datediff(d,STAYS.visitdatetime, COHX.indexdate) between 0 and &DXLOOKBACK
-						INNER JOIN
+						%if &useSrc3 %then LEFT; %else INNER; JOIN
 					
-						CDWWork.Dim.StopCode SC
-						on STAYS.primarystopcodeSID=SC.stopcodeSID) ASIDE
+						CDWWork&SrcNum..Dim.StopCode&SrcExt SC
+						on STAYS.primarystopcodeSID=SC.stopcodeSID and STAYS.sta3n=SC.sta3n) ASIDE
 					/* End of Aside -- outpatient */
 
 					INNER JOIN
 
 					(
-					select DSIDEsub.VISITsid, DSIDEsub.condition, DSIDEsub.codesid,	DSIDEsub.dxpos, DSIDEsub.codetype, 
+					select DSIDEsub.patientSID, DSIDEsub.sta3n, DSIDEsub.VISITsid, 
+					DSIDEsub.condition, DSIDEsub.codesid,	DSIDEsub.dxpos, DSIDEsub.codetype, 
 					DSIDEsub.code, DSIDEsub.rawcode 
 					from
 						/* Join cohort to cohort xwalk to make COHX, then join this to outpatient DSIDE created below */
-							(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid 
+							(select distinct coh.patientICN, coh.indexdate, ptxw.patientsid, ptxw.sta3n
 								from Dflt.&PPL coh inner join &xwloc..CohortCrosswalk ptxw
 								on coh.patientICN=ptxw.patientICN) COHX
 							INNER JOIN
 
 						/* DSIDEsub -- outpatient -- join outpatient VDiagnosis table to condition list via icd9/10 dim tables */
-						(select DISCHDX.patientsid, DISCHDX.visitSID, DISCHDX.visitdatetime, DISCHDX.codetype, DISCHDX.codesid,
+						(select DISCHDX.patientsid, DISCHDX.sta3n, DISCHDX.visitSID, DISCHDX.visitdatetime, DISCHDX.codetype, DISCHDX.codesid,
 						DISCHDX.dxpos, CODES.code, CODES.condition, CODES.rawcode from		
-							(select patientsid, visitSID, visitdatetime, 'Dx09' as codetype,
+							(select patientsid, sta3n, visitSID, visitdatetime, 'Dx09' as codetype,
 								icd9sid as codesid, PrimarySecondary as dxpos
 								from &OPDX WHERE visitdatetime>=@LBstart and visitdatetime<=@LBend and icd9sid>0 
 								UNION ALL
-								select patientsid, visitSID, visitdatetime, 'Dx10' as codetype,
+								select patientsid, sta3n, visitSID, visitdatetime, 'Dx10' as codetype,
 								icd10sid as codesid, PrimarySecondary as dxpos
 								from &OPDX WHERE visitdatetime>=@LBstart and visitdatetime<=@LBend and icd10sid>0) DISCHDX
 							INNER JOIN
 
-							(select distinct codelist.code, codelist.codetype, codelist.condition, codestack.rawcode, codestack.codesid 
+							(select distinct codelist.code, codelist.codetype, codelist.condition, codestack.rawcode, codestack.codesid, codestack.sta3n 
 								from 
 								%if &allowNULLcodes %then %do;
 									(select case when code is NULL then '' else code end as code, 
@@ -449,21 +499,21 @@
 								%end; codelist
 								INNER JOIN
 
-									(select distinct 'Dx09' as codetype, icd9code as rawcode, icd9sid as codesid
-									from CDWWork.Dim.ICD9
+									(select distinct 'Dx09' as codetype, icd9code as rawcode, icd9sid as codesid, sta3n
+									from CDWWork&SrcNum..Dim.ICD9&SrcExt
 									UNION ALL
-									select distinct 'Dx10' as codetype, icd10code as rawcode, icd10sid as codesid
-									from CDWWork.Dim.ICD10) codestack
+									select distinct 'Dx10' as codetype, icd10code as rawcode, icd10sid as codesid, sta3n
+									from CDWWork&SrcNum..Dim.ICD10&SrcExt) codestack
 								ON codelist.codetype=codestack.codetype and codestack.rawcode
 									%if &uselike %then LIKE codelist.code+'%'; %else = codelist.code;) CODES
 									
-							ON DISCHDX.codetype=CODES.codetype and DISCHDX.codesid=CODES.codesid) DSIDEsub
+							ON DISCHDX.codetype=CODES.codetype and DISCHDX.codesid=CODES.codesid and DISCHDX.sta3n=CODES.sta3n) DSIDEsub
 						/* End of DSIDEsub -- outpatient */
 
-						ON COHX.patientsid=DSIDEsub.patientsid and
+						ON COHX.patientsid=DSIDEsub.patientsid and COHX.sta3n=DSIDEsub.sta3n and
 						datediff(d,DSIDEsub.visitdatetime, COHX.indexdate) between 0 and &DXLOOKBACK) DSIDE
 
-					ON ASIDE.visitSID=DSIDE.visitSID	
+					ON ASIDE.patientSID=DSIDE.patientSID and ASIDE.sta3n=DSIDE.sta3n and ASIDE.visitSID=DSIDE.visitSID	
 						) SHELL;
 
 		) by user;
@@ -478,21 +528,23 @@
 		%let keepOPfails=1;
 	%end;
 	
-	%if &create_view %then %do;
+	%if &create_view or &create_sas_event_file %then %do;
 		%if &vwlib= %then %do;
 			libname vwlib "/data/dart/%substr(%scan(&datsrc,-1,_),1,4)/&datsrc";  /* note this only works for <datsrc> in the form 'xxx_<PIname>_YYYYMMDDxd' ! */
 			%let vwlib=vwlib;
 			%put :: NOTE: no library specified for output view -- set to parent directory for project &datsrc;
 		%end;
 
-		proc sql;
+		proc sql undo_policy=NONE;
 		connect to sqlsvr as user (datasrc=&dhandle &sql_optimal);
 
 		/*execute(use [&datsrc];) by user; */
-		create view &vwlib..&OUTTABLE as 
+		create %if &create_sas_event_file %then table; %else view; &vwlib..&OUTTABLE as 
 		select  
 			patientICN 		length=10
 			, indexdate		length=8
+			, patientSID		length=8
+			, sta3n			length=4
 			, inpat_or_vis_SID 	length=8
 			, admit_or_vis_datetime length=8
 			, disch_or_vis_datetime length=8
@@ -512,6 +564,13 @@
 		from connection to user (
 			select * from Dflt.&OUTTABLE);
 
+		%if &create_sas_event_file %then %do;
+			* since a SAS dataset was created (as opposed to a view), drop the SQL tables ;
+			execute(drop table if exists Dflt.&PPL;) by user;
+			execute(drop table if exists Dflt.&CODES;) by user;
+			execute(drop table if exists Dflt.&OUTTABLE;) by user;
+		%end;
+
 		disconnect from user;
 		quit;
 	%end; *create_view;
@@ -524,17 +583,17 @@
 			%put ===================================================================== ;
 			%put :: You must specify a PTFILE in the macro call! SAS is quitting.... ;
 			%put ===================================================================== ;
-			endsas;
+			%abort;
 		%end;
 		%if &codefile= %then %do;
 			%put ===================================================================== ;
 			%put :: You must specify a CODEFILE in the macro call! SAS is quitting.... ;
 			%put ===================================================================== ;
-			endsas;
+			%abort;
 		%end;
 
 		data WORK.rawevents (rename=(indate=indexdate));
-		set &dftlib..&OUTTABLE;
+		set %if &create_sas_event_file %then &vwlib..&OUTTABLE; %else &dftlib..&OUTTABLE;;
 		length inpt 3 evdate indate 5;
 		%if &strict_inpt=0 %then %do;
 			factype=upcase(factype); /* less strict 'inpatient' definition allows inpt-setting dxs 
@@ -564,7 +623,7 @@
 		n_index+first.indexdate;
 		run;
 
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select max(n_index) into :maxn from WORK.rawevents;
 		quit;
 
@@ -629,7 +688,7 @@
 		run; quit;
 	
 		** this is a crude check to determine whether indexdate in <PTFILE> is a date or datetime ;
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select (year(max(indexdate))=.) into :dttime from &ptfile;
 		quit;	
 
@@ -646,7 +705,7 @@
 		by patientICN indexdate;
 		run;
 
-		proc sql noprint;
+		proc sql undo_policy=NONE noprint;
 		select distinct compress("conf_" || upcase(condition)) into :cvars separated by " " from &codefile;
 		quit;
 
@@ -664,7 +723,7 @@
 		drop i;
 		run;
 
-		proc sql;
+		proc sql undo_policy=NONE;
 		title "Missing the following conditions from the output table...";
 		select name from dictionary.columns 
 			where libname='WORK' and lowcase(memname)='ptfile_temp' and lowcase(substr(name,1,5))='conf_'
@@ -708,7 +767,7 @@
 		run;
 	
 		%if &dropSQLtable=1 %then %do;
-			proc sql;
+			proc sql undo_policy=NONE;
 			connect to sqlsvr as user (datasrc=&dhandle &sql_optimal);
 			execute(drop table if exists Dflt.&PPL;) by user;
 			execute(drop table if exists Dflt.&CODES;) by user;
