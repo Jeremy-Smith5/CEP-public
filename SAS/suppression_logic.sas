@@ -76,7 +76,7 @@ if last then do;
 		minX=1;
 		minY=1;
 		minXloc=.;
-		minXloc=.;
+		minYloc=.;
 		do xloc=1 to hbound(T, 1);
 			if xloc ^= x and T[xloc, y] / T[0, y] <= minX then do;
 				minXloc=xloc;
