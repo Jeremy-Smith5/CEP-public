@@ -4,8 +4,7 @@
 ## Jeremy Smith
 ## Feb 2026
 
-## EXAMPLE CALL:
-
+## EXAMPLE CALL: see cp.example.call.R in this folder
 
 cp <- function(
     cpevents, # R dataframe (<ptid> startdate enddate event edate days)
@@ -212,4 +211,5 @@ cp <- function(
   return(outcp)
   
 }
+
 
