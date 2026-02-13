@@ -1,3 +1,4 @@
-These are just sample data for use with some of the code found here.  The file 'synthetic_pde.csv' is from the 
-Center for Mediare and Medicaid Services (CMS) website and represents a *simulated* version of the Prescription 
-Drug Event (PDE) file.  
+SAMPLE DATA FOR TESTING -- 
+synthetic_cp_bounds.csv and synthetic_cp_events.csv are derived from the Center for Medicare and Medicaid's synthetic version 
+of the Prescription Drug Event (PDE) dataset. They are formatted to serve as input for the various counting process scripts 
+in this repo. THESE ARE NOT REAL DATA!
