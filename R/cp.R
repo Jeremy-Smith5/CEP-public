@@ -4,13 +4,33 @@
 ## Jeremy Smith
 ## Feb 2026
 
-## EXAMPLE CALL: see cp.example.call.R in this folder
+## EXAMPLE CALL:
+# indata <- data.frame(
+#   ptid=c(101, 101, 101, 101, 101, 102, 102, 102, 102),
+#   startdate=as.Date(c(50, 50, 50, 50, 50, 300, 300, 300, 300)),
+#   enddate=as.Date(c(160, 160, 160, 160, 160, 450, 450, 450, 450)),
+#   event=c("A", "C", "C", "A", "C", "D", "C", "outcome_fail", "C"),
+#   edate=as.Date(c(58, 70, 78, 92, 150, 328, 328, 340, 390)),
+#   days=c(30, 15, 15, 45, 15, 28, 15, 1, 15),
+#   labval=c(NA, 22.9, 30.8, NA, 24.5, NA, 42.2, NA, 40.7)
+# )
+# 
+#   source("/path/to/cp/cp.R")
+#   
+# cpdata <- cp(
+#   indata, # R dataframe (<ptid> startdate enddate event edate days)
+#   # cpbounds: [optional] R dataframe: unique(<ptid> startdate enddate) - if not prov., created from cpevents
+#   ptid = "ptid" , # patient identifier
+#   dupeventaction = "sum" # handling days var for same event, same edate
+# )
+#   
+# print(head(cpdata, 50))
 
 cp <- function(
     cpevents, # R dataframe (<ptid> startdate enddate event edate days)
     cpbounds, # [optional] R dataframe: unique(<ptid> startdate enddate) - if not prov., created from cpevents
     ptid = "ptid" , # patient identifier
-    dupeventaction = "sum", # handling days var for same event, same edate
+    dupeventaction = "max", # handling days var for same event, same edate
     cleanup = TRUE # convert all 'cabinet' values to 0/1
 ) {
 
@@ -23,10 +43,20 @@ cp <- function(
 
   if (!missing(cpbounds)) {if (is.data.frame(get("cpbounds"))) {cpboundsOK <- TRUE}}
   if (!cpboundsOK) {
-    print("NOTE: ...cpbounds dataframe will be created from cpevents")
+    message("NOTE: ...cpbounds dataframe will be created from cpevents")
   }
-   cpeventvars <- names(cpevents)
-   cpeventvars_req <- c(ptid, "event", "edate", "days")
+  cpeventvars <- names(cpevents)
+  cpeventvars_req <- c(ptid, "event", "edate", "days")
+  
+  anylabs <- FALSE
+  if ("labval" %in% cpeventvars) {
+    labevents <- unique(cpevents[!is.na(cpevents$labval), "event"])
+    if (length(labevents)) {
+      anylabs <- TRUE
+      cpeventvars_req[5] <- "labval"
+    }
+  }
+  
   if (!all(cpeventvars_req %in% cpeventvars)) {
     stop(sprintf("...the cpevents df must contain: [%s]", cpeventvars_req))
   }
@@ -54,15 +84,16 @@ cp <- function(
                 (any(is.na(c(cpbounds$startdate, cpbounds$enddate)))), ])
 
   if (nbadbounds > 0) {
-    print(sprintf("WARNING: %s patients will be dropped d/t invalid start or end date", nbadbounds))
+    message(sprintf("WARNING: %s patients will be dropped d/t invalid start or end date", nbadbounds))
   }
 
   cpbounds <- cpbounds[(cpbounds$enddate > cpbounds$startdate &
                           !any(is.na(c(cpbounds$startdate, cpbounds$enddate)))), ]
+  
   npts <- nrow(cpbounds)
   eventvec <- sort(unique(cpevents$event))
   eventvec[[length(eventvec) + 1]] <- "cpstop"
-  
+
   allcp <- list()
 
   for (ptnum in 1:npts) {
@@ -70,15 +101,26 @@ cp <- function(
     pti <- cpbounds[ptnum, ptid]
     stdti <- cpbounds[ptnum, "startdate"]
     endti <- cpbounds[ptnum, "enddate"]
-
-    cabinet <- rep(0, length(eventvec))
-    names(cabinet) <- eventvec
-
+    
     # extract events for this person
     pti_events <- cpevents[cpevents[[ptid]] == pti, 2:ncol(cpevents)]
 
-    # drop any records that have NA values
-    pti_events <- pti_events[complete.cases(pti_events), ]
+    ocrecs <- which(grepl("^outcome_", pti_events$event))
+    if (length(ocrecs)) {
+      minocdate <- as.Date(min(pti_events[ocrecs, "edate"]))
+      endti <- pmin(endti, minocdate + 1)
+    }
+
+    cabinet <- rep(0, length(eventvec))
+    names(cabinet) <- eventvec
+    
+    if (anylabs) {
+      labs_cabinet <-rep(NA, length(eventvec))
+      names(labs_cabinet) <- paste(eventvec, "value", sep = ".")
+    }
+
+    # drop any records that have NA values (ignoring lab values)
+    pti_events <- pti_events[complete.cases(pti_events[c("event", "edate", "days")]), ]
     # round decimal days to whole numbers
     pti_events$days <- round(pti_events$days)
 
@@ -94,7 +136,11 @@ cp <- function(
     pti_events <- pti_events[pti_events$days > 0 & pti_events$edate <= endti, ]
 
     pti_events <- pti_events[order(pti_events$edate, pti_events$event), ]
-    pti_events[nrow(pti_events)+1, ] <- list("cpstop", endti+15000, 1)    
+    
+    dummyrow <- list("cpstop", endti + 15000, 1)
+    if (anylabs) { dummyrow[[4]] <- NA }
+    pti_events[nrow(pti_events)+1, ] <- dummyrow
+    
     pti_edates <- sort(unique(pti_events$edate))
     prior_edate <- stdti
     ptcp <- list()
@@ -105,16 +151,18 @@ cp <- function(
     if (n_edates == 0) {
       # patient had no events within start/end boundaries - 
       # ...output a single record showing no exposure
-      ptcp[[1]] <- data.frame(
+      outrow <- list(
         person=pti, 
         startdate=stdti, 
         enddate=endti, 
         winstart=stdti, 
         winend=endti,
-        len = as.integer(endti - stdti),
-        as.list(cabinet),
-        stringsAsFactors = FALSE
-      )      
+        len = as.integer(endti - stdti)
+      )
+      outrow <- c(outrow, as.list(cabinet))
+
+      if (anylabs) { outrow <- c(outrow, as.list(labs_cabinet)) }
+      ptcp[[1]] <- data.frame(outrow, stringsAsFactors = FALSE)
     } else {
       for (edtnum in 1:n_edates) {
         
@@ -126,27 +174,32 @@ cp <- function(
   
           minval <- as.integer(min(cabinet[cabinet > 0 & cabinet < (edt - prior_edate)]))
 
-  
           ws <- prior_edate
           prior_edate <- pmin(endti, ws + minval)
 
-          ptcp[[ptcprow]] <- data.frame(
+          outrow <- list(
             person=pti, 
             startdate=stdti, 
             enddate=endti, 
             winstart=ws, 
             winend=prior_edate,
-            len = as.integer(prior_edate - ws),
-            as.list(cabinet),
-            stringsAsFactors = FALSE
-            )
+            len = as.integer(prior_edate - ws)
+          )
+          outrow <- c(outrow, as.list(cabinet))
+
+          if (anylabs) {
+            minlocs <- which(cabinet == minval)
+            outrow <- c(outrow, as.list(labs_cabinet))
+            labs_cabinet[minlocs] <- NA
+            }
+          ptcp[[ptcprow]] <- data.frame(outrow, stringsAsFactors = FALSE)
           
           if (prior_edate == endti) { break }
           cabinet <- cabinet - minval
           
         }
   
-        if (edtnum == n_edates) { break }
+        if (edtnum == n_edates && prior_edate == endti) { break }
         
         pti_edate_events <- pti_events[pti_events$edate == edt, c("event", "days")]
         pti_edate_events <- setNames(pti_edate_events$days, pti_edate_events$event)
@@ -155,29 +208,65 @@ cp <- function(
         basket <- rep(0, length(eventvec))
         names(basket) <- eventvec
         basket[names(pti_edate_events)] <- pti_edate_events
-
+        
         offons <- which(cabinet <= 0 & basket > 0)
         onons <- which(cabinet > 0 & basket > 0)
+        
+        if (anylabs) {
+          pti_edate_labs <- pti_events[pti_events$edate == edt, c("event", "labval")]
+          pti_edate_labs <- setNames(pti_edate_labs$labval, paste(pti_edate_labs$event, "value", sep = "."))
+          pti_edate_labs <- tapply(pti_edate_labs, names(pti_edate_labs), max)
+          
+          labs_basket <- rep(NA, length(eventvec))
+          names(labs_basket) <- names(labs_cabinet)
+          labs_basket[names(pti_edate_labs)] <- pti_edate_labs
+          
+          if (any(!is.na(pti_edate_labs))) {
 
-        gap <- as.integer(edt - prior_edate)
+            # for the members of labs_basket that are not NA, identify all corresponding values of 
+            # labs_cabinet that are not the same (either NA or unequal value) -- these will be the 
+            # off->ons for the labs
+            compCB <- (labs_basket[!is.na(labs_basket)] != labs_cabinet[!is.na(labs_basket)] 
+                       | is.na(labs_cabinet[!is.na(labs_basket)]))
+            
+            ovrwrite <- setNames(rep(FALSE, length(labs_basket)), names(labs_basket))
+            ovrwrite[names(compCB)] <- compCB
+
+            # re-create the off->on vector, now incorporating the information in ovrwrite
+            offons <- which((cabinet <= 0 & basket > 0) | ovrwrite)
+          }
+        }
+
+        wend <- pmin(endti, edt)
+        gap <- as.integer(wend - prior_edate)
 
         if (length(offons) && edt > prior_edate) {
           # output the latent record and prepare for new exposure
           ptcprow <- ptcprow + 1
-          ptcp[[ptcprow]] <- data.frame(
+          outrow <- list(
             person = pti,
             startdate = stdti,
             enddate = endti,
             winstart = prior_edate,
-            winend = edt,
-            len = gap,
-            as.list(cabinet),
-            stringsAsFactors = FALSE
+            winend = wend,
+            len = gap
           )
+          outrow <- c(outrow, as.list(cabinet))
+
+          if (anylabs) {
+            outrow <- c(outrow, as.list(labs_cabinet))
+            labs_cabinet[!is.na(labs_basket)] <- labs_basket[!is.na(labs_basket)]
+          }
+
+          ptcp[[ptcprow]] <- data.frame(outrow, stringsAsFactors = FALSE)
+          
+          if (edtnum == n_edates) { break }
+          
           prior_edate <- edt
           cabinet <- cabinet - gap
         }
 
+        # unload basket into cabinet
         for (n in 1:length(cabinet)) {
           if (n %in% offons) {
             cabinet[n] <- pmax(cabinet[n], basket[n])
@@ -187,7 +276,8 @@ cp <- function(
         }
 
       }  # end edate loop
-    }
+      
+    }  # end else block
     
     # stack all rows for this patient
     allcp[[ptnum]] <- do.call(rbind, ptcp)
@@ -200,6 +290,12 @@ cp <- function(
   # clean up
   outcp$cpstop <- NULL
   names(outcp)[1] <- ptid
+  if (anylabs) {
+    valnames <- names(outcp[grepl("\\.value$", names(outcp))])
+    labevents <- paste(labevents, "value", sep = ".")
+    valnames <- valnames[labevents != valnames]
+    outcp[valnames] <- NULL
+  }
   
   eventvec <- eventvec[-length(eventvec)]
   
